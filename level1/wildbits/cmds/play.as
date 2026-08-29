@@ -88,7 +88,7 @@ edition = 16
 
 * Here are some tweakable options
 DOHELP              set       1                   1 = include help info
-SID_MAX_VOL         equ       15                  (0 = silence, 15 = loud) for all SID Voices
+SID_MAX_VOL         equ       6                   (0 = silence, 15 = loud) for all SID Voices - halved from 11 (Musica was still too loud vs Lyra)
 SID_V1_CR1          equ       %00010001           SID Voice 1 Gate
 SID_V2_CR1          equ       %00010001           SID Voice 2 Gate
 SID_V3_CR1          equ       %00010001           SID Voice 3 Gate
@@ -98,7 +98,7 @@ SID_V3_PULSE_DUTY   equ       $800
 SID_V1_ADSR         equ       $00F0
 SID_V2_ADSR         equ       $00F0
 SID_V3_ADSR         equ       $00F0
-MIDIVEL_DEFAULT     equ       80                  0..127 for MIDI velocity
+MIDIVEL_DEFAULT     equ       102                 0..127 for MIDI velocity - raised from 80 to balance Lyra loudness against Musica/SID
 PLAYLISTITEM_MAXSTR equ       255
 
 FILETYPE_MUSICA     equ       1
@@ -535,7 +535,8 @@ a@                  ldd       1,s                 Recall address of top of file
                     bne       gm@                 User has applied a patch file
                     lbsr      MidiMuteAll
                     lbsr      SetupInstruments    Auto-sensing instrument translation
-gm@                 ldb       #1                  Enable the sequencer
+gm@                 lbsr      MidiVolAll          Max out CC7 channel volume (after MuteAll's reset restores defaults)
+                    ldb       #1                  Enable the sequencer
                     stb       <fDoSequencer
 
 ********************************************************************
@@ -730,6 +731,24 @@ a@                  orb       TRACK_MIDICHAN,y    Get the target channel
 *                    ldb       TRACK_VELOC,y       Get velocity for this channel
                     stb       >MIDI_DataReg
                     rts
+
+* Set CC7 (channel volume) to maximum on all 16 MIDI channels.
+* The synth powers up around 100/127 (~4dB down), part of why Lyra
+* sits so far under the SID.  Must run AFTER MidiMuteAll - its sysex
+* reset restores the default channel volumes.
+MidiVolAll          clr       ,-s                 First MIDI channel #
+a@                  lda       #MIDICMD_CC         Control Change $Bx
+                    ora       ,s                  Mix in the channel (x)
+                    sta       >MIDI_DataReg
+                    ldb       #$07                CC7 = Channel Volume
+                    stb       >MIDI_DataReg
+                    ldb       #127                Maximum
+                    stb       >MIDI_DataReg
+                    inc       ,s
+                    lda       ,s
+                    cmpa      #16
+                    blo       a@
+                    puls      a,pc
 
 MidiMuteAll         clr       ,-s                 First MIDI channel #
 a@                  lda       #MIDICMD_CC         Control Change $Bx
@@ -1917,7 +1936,7 @@ TrioLengths         fcb       $00
                     fcb       $01               [0,4,0]
 
 * Conversion table for Lyra volume (0-7) into MIDI velocity (0-127)
-LyraVelocConv       fcb       1,70,75,80,85,90,95,105
+LyraVelocConv       fcb       1,90,96,102,108,114,120,127 rescaled from 1,70,75,80,85,90,95,105 to balance Lyra against Musica/SID
 
 * Program the MIDI instruments per the Lyra header
 * Lyra has 8 virtual channels, and each one can link to any physical MIDI channel.
