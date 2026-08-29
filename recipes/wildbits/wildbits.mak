@@ -52,10 +52,16 @@ CLOCK = clock clock2_wildbits
 # NOTE!!!
 # VTIO must be near the top of the bootlist so that it can safely map
 # the text and CLUT blocks into $E000-$FFFF.
+# SIZE CEILING: the booter loads OS9Boot at $FE00 minus its size
+# (os9boot.as "Loading sector."); past 32,256 bytes ($7E00) the load
+# address drops below $8000 and the load wedges on the first sector.
+# Keep the boot list lean - sc16550/t0 stay OUT (not needed for
+# DriveWire, /t0 shares the DW UART at $FE60 anyway).
 ifeq ($(LEVEL),2)
 BOOTMODS = krnp2 ioman init \
 	$(SCF) \
 	$(RBF) \
+	dwio_serial $(PIPE) $(DRIVEWIRE_RBF) \
 	$(CLOCK) \
 	$(BOOTMODS_EXTRA) \
 	krn
@@ -63,12 +69,18 @@ else
 BOOTMODS = krn krnp2 ioman init \
 	$(SCF) \
 	$(RBF) \
+	dwio_serial $(PIPE) $(DRIVEWIRE_RBF) \
 	$(CLOCK) \
 	sysgo shell_21 \
 	$(BOOTMODS_EXTRA)
 endif
 
-SHELLMODS = shellplus date deiniz echo iniz link load save unlink
+# TEMPORARY workaround for Windows / cygwin64 / toolshed 2.6 build hosts:
+# with the alphabetical merge order (date directly after shellplus)
+# the resulting shell freezes before the prompt appears. Keeping date
+# and deiniz at the END of the merge avoids it. Suspected shellplus
+# read-past-module-end; revisit when toolshed is updated.
+SHELLMODS = shellplus echo iniz link load save unlink date deiniz
 FUJINET_CMDS = fngetdevfile fnsetdevfile fnlisthosts fngethost fnsethost \
 	fnlistdevs fnmount fnmountimg fnstatus
 ifeq ($(FUJINET),1)
@@ -80,10 +92,13 @@ ifeq ($(FM),1)
 LFLAGS += -lfm
 CMDS_EXTRA += $(FM_CMDS)
 endif
+# $(BASIC09) removed from CMDS: it needs the separate nitros9-languages
+# repo (basic09_wildbits / runb_6809) which is not always present; a
+# missing LANGUAGES tree kills the whole disk build otherwise.
 CMDS += $(STDCMDS) shell \
 	bootos9 scfg wbinfo wbreset modem \
-inetd telnet dw httpd $(BASIC09) $(BF) \
-	$(CMDS_EXTRA) wildspeed
+inetd telnet dw httpd $(BF) \
+	$(CMDS_EXTRA) wildspeed w6100eth
 
 ifeq ($(LEVEL),2)
 UTILPAK1_MODS = attr copy date del deiniz dir display list makdir mdir \
@@ -199,8 +214,10 @@ endif
 	$(OS9ATTR_EXEC) $(foreach file,$(BACKGROUNDS),$@,SYS/backgrounds/$(file))
 	$(CPL) $(STARTUP) $@,startup
 	$(OS9ATTR_TEXT) $@,startup
+ifneq ($(strip $(BASIC09_FILES)),)
 	$(MAKDIR) $@,BASIC09
 	$(CPL) $(BASIC09_FILES) $@,BASIC09
+endif
 	$(MAKDIR) $@,SCRIPTS
 	$(foreach file,$(SCRIPTS),$(CPL) $(SCRIPTS_DIR)/$(file) $@,SCRIPTS;)
 	$(MAKDIR) $@,TESTS
@@ -212,6 +229,9 @@ endif
 # Command rules
 $(MODDIR)/shell: $(addprefix $(MODDIR)/,$(SHELLMODS)) | $(MODDIR)
 	$(MERGE) $(addprefix $(MODDIR)/,$(SHELLMODS)) >$@
+
+$(MODDIR)/w6100eth: $(LEVEL1)/wildbits/cmds/w6100eth.as | $(MODDIR)
+	$(AS) $(AFLAGS) $< $(ASOUT)$@
 
 $(MODDIR)/pwd: pd.asm | $(MODDIR)
 	$(AS) $(AFLAGS) $< $(ASOUT)$@ -DPWD=1
