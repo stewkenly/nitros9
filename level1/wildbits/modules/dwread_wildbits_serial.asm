@@ -36,7 +36,24 @@ loop2@              lda       UART.Base+UART_LSR  get the LSR register value
                     lda       ,s                  get CC off stack
                     anda      #^$04               clear the Z flag to indicate not all bytes received.
                     sta       ,s
-                    bra       bye@
+* RX resync purge (2026-08-28): after a timeout, the server's remaining
+* bytes may still arrive and sit in the 16-byte FIFO, poisoning the NEXT
+* transaction (the cascading-#244 pattern). Drain the FIFO and any late
+* stragglers until the line has been idle for 10+ character times.
+* Bounded (max ~1200 discards); IRQs are still masked here; X is
+* restored from the stack at exit so it is free to use.
+                    ldy       #1200               max stale bytes to discard
+prg0@               ldx       #256                idle window, ~0.5ms (>10 char times at 230400)
+prg1@               lda       UART.Base+UART_LSR
+                    bita      #LSR_DATA_AVAIL
+                    bne       prg2@               late byte - discard it, restart idle window
+                    leax      -1,x
+                    bne       prg1@
+                    bra       bye@                line went idle - resync complete
+prg2@               lda       UART.Base+UART_TRHB discard stale byte
+                    leay      -1,y
+                    bne       prg0@
+                    bra       bye@                discard cap hit - stop draining
 getbyte@            ldb       UART.Base+UART_TRHB get the data byte
                     stb       ,u+                 save off acquired byte
                     abx                           update checksum
