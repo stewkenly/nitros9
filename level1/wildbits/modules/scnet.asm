@@ -4,14 +4,18 @@
 ********************************************************************
 * scnet - SuperCoCo Native Network v0.1 SCF driver
 *
-* N3a scope:
+* N3b-0 scope:
 * - one /net0 device
 * - SuperCoCo Native Network ABI v1 at $FF70-$FF7F
 * - direct hardware FIFO Read/Write (no software payload ring)
 * - Level 2 reader suspend/wake through the native RX/CLOSE/ERROR IRQ
 * - SS.Ready reports the hardware RX FIFO count
-* - connection setup is intentionally NOT defined here yet; N3a keeps
-*   the guest control ABI separate until the SetStat interface is frozen
+* - SS.NetCn submits a versioned asynchronous hostname/port TCP request
+* - SS.NetSt returns a versioned native-network state snapshot
+* - caller buffers are accessed through Level 2 task-aware primitives
+*
+* N3b-0 does not yet make TX_READY load-bearing for a blocked writer; that
+* remains part of the later N3b transmit-backpressure acceptance step.
 *
 * The receive IRQ is level-sensitive.  The ISR therefore MASKS the read
 * wake sources before waking a blocked reader.  Read re-arms them only
@@ -21,49 +25,11 @@
 
                     ifp1
                     use       defsfile
+                    use       supercoco.d
                     endc
 
-* SuperCoCo Native Network v0.1 register offsets from V.PORT ($FF70).
-NET_ABI             equ       $00
-NET_CAPS            equ       $01
-NET_STATUS          equ       $02
-NET_COMMAND         equ       $03
-NET_RESULT          equ       $04
-NET_IRQ_STATUS      equ       $05
-NET_IRQ_MASK        equ       $06
-NET_PORT_HI         equ       $07
-NET_PORT_LO         equ       $08
-NET_HOST_LEN        equ       $09
-NET_HOST_DATA       equ       $0A
-NET_RX_COUNT        equ       $0B
-NET_TX_SPACE        equ       $0C
-NET_RX_DATA         equ       $0D
-NET_TX_DATA         equ       $0E
-
-NET_ABI_VERSION     equ       $01
-
-NET_CAP_TCP         equ       %00000001
-NET_CAP_HOSTNAME    equ       %00000010
-NET_CAP_IRQ         equ       %00000100
+* Driver policy derived from the shared SuperCoCo contract.
 NET_REQUIRED_CAPS   equ       NET_CAP_TCP!NET_CAP_IRQ
-
-NET_ST_LINK_UP      equ       %00000001
-NET_ST_CONNECTING   equ       %00000010
-NET_ST_CONNECTED    equ       %00000100
-NET_ST_RX_READY     equ       %00001000
-NET_ST_TX_READY     equ       %00010000
-NET_ST_CMD_BUSY     equ       %00100000
-NET_ST_ERROR        equ       %01000000
-
-NET_CMD_RESET       equ       $01
-NET_CMD_CONNECT     equ       $10
-NET_CMD_CLOSE       equ       $11
-
-NET_IRQ_RX_READY    equ       %00000001
-NET_IRQ_CONNECT     equ       %00000010
-NET_IRQ_CLOSED      equ       %00000100
-NET_IRQ_ERROR       equ       %00001000
-NET_IRQ_TX_READY    equ       %00010000
 NET_IRQ_READ_WAKE   equ       NET_IRQ_RX_READY!NET_IRQ_CLOSED!NET_IRQ_ERROR
 NET_IRQ_LATCHED     equ       NET_IRQ_CONNECT!NET_IRQ_CLOSED!NET_IRQ_ERROR!NET_IRQ_TX_READY
 
@@ -73,7 +39,7 @@ NET_IRQ_LATCHED     equ       NET_IRQ_CONNECT!NET_IRQ_CLOSED!NET_IRQ_ERROR!NET_I
 MemSize             equ       .
 
 rev                 set       1
-edition             set       1
+edition             set       2
 
                     mod       ModSize,ModName,Drivr+Objct,ReEnt+rev,ModEntry,MemSize
 
@@ -336,14 +302,17 @@ WriteError          lda       ,s
 ********************************************************************
 * GStt
 *
-* N3a implements the two status operations needed by normal stream users:
-* SS.EOF is never asserted by SCF; SS.Ready reports the native RX count.
+* N3b retains the stream status calls and adds SS.NetSt.  R$X in the saved
+* register packet is a caller-task address under Level 2, so the response is
+* written with F$STABX rather than dereferenced directly in system state.
 ********************************************************************
 GStt                clrb
                     pshs      cc
                     ldx       PD.RGS,y
                     cmpa      #SS.EOF
                     beq       GSttOK
+                    cmpa      #SS.NetSt
+                    beq       GSttNetSt
                     cmpa      #SS.Ready
                     bne       GSttUnknown
 
@@ -354,6 +323,58 @@ GStt                clrb
                     stb       R$B,x
 GSttOK              puls      cc,pc
 
+* SS.NetSt v1: R$X is the caller destination and R$Y is its capacity.
+* F$STABX performs each store in the caller's DAT task without shared scratch.
+GSttNetSt           ldx       PD.RGS,y
+                    ldd       R$Y,x
+                    cmpd      #NETST_SIZE
+                    blo       GSttBufSmall
+                    ldx       R$X,x
+                    pshs      y,u
+                    ldy       V.PORT,u
+                    ldu       >D.Proc
+                    ldb       P$Task,u
+
+                    lda       #NETST_VERSION
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_ABI,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_CAPS,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_STATUS,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_RESULT,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_IRQ_STATUS,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_RX_COUNT,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+                    leax      1,x
+                    lda       NET_TX_SPACE,y
+                    os9       F$STABX
+                    bcs       GSttNetStError
+
+                    clrb
+                    puls      y,u
+                    bra       GSttOK
+
+GSttNetStError     puls      y,u
+                    bra       GSttError
+GSttBufSmall        ldb       #E$BufSiz
+                    bra       GSttError
 GSttNotReady        ldb       #E$NotRdy
                     bra       GSttError
 GSttUnknown         ldb       #E$UnkSvc
@@ -365,28 +386,147 @@ GSttError           lda       ,s
 ********************************************************************
 * SStt
 *
-* Accept the standard SCF lifecycle/configuration notifications without
-* inventing the native connect-control ABI yet.  SS.HngUp maps naturally
-* to TCP_CLOSE; SS.Reset maps to the native deterministic RESET command.
+* N3b adds SS.NetCn as a versioned asynchronous connection request.  The
+* caller buffer remains in the caller's DAT task; F$LDABX is used for all
+* buffer reads so no Level 2 user pointer is dereferenced in system state.
 ********************************************************************
 SStt                clrb
                     pshs      cc
                     cmpa      #SS.ComSt
-                    beq       SSttOK
+                    lbeq      SSttOK
                     cmpa      #SS.Open
-                    beq       SSttOK
+                    lbeq      SSttOK
                     cmpa      #SS.Close
-                    beq       SSttOK
+                    lbeq      SSttOK
+                    cmpa      #SS.NetCn
+                    beq       SSttNetCn
                     cmpa      #SS.HngUp
-                    beq       SSttClose
+                    lbeq      SSttClose
                     cmpa      #SS.Reset
-                    beq       SSttReset
+                    lbeq      SSttReset
 
-                    ldb       #E$UnkSvc
-                    lda       ,s
-                    ora       #Carry
-                    sta       ,s
-                    puls      cc,pc
+SSttUnknown         ldb       #E$UnkSvc
+                    lbra      SSttError
+
+* SS.NetCn v1: validate the fixed header before touching hardware.  A valid
+* request stages port/hostname and issues TCP_CONNECT, then returns immediately;
+* completion is observed later through SS.NetSt/CMD_BUSY/result/event state.
+SSttNetCn           ldx       PD.RGS,y
+                    ldd       R$Y,x
+                    cmpd      #NETCN_FIXED_SIZE
+                    lblo      SSttNetCnBufSmall
+                    ldx       R$X,x
+
+* Preserve the driver's entry context, retain caller capacity, and allocate a
+* four-byte system-stack copy of the fixed request header.
+                    pshs      y,u
+                    pshs      d
+                    leas      -NETCN_FIXED_SIZE,s
+
+                    ldy       V.PORT,u
+                    ldu       >D.Proc
+                    ldb       P$Task,u
+
+                    os9       F$LDABX
+                    bcs       SSttNetCnReadError
+                    sta       NETCN_O_VERSION,s
+                    leax      1,x
+                    os9       F$LDABX
+                    bcs       SSttNetCnReadError
+                    sta       NETCN_O_HOSTLEN,s
+                    leax      1,x
+                    os9       F$LDABX
+                    bcs       SSttNetCnReadError
+                    sta       NETCN_O_PORT,s
+                    leax      1,x
+                    os9       F$LDABX
+                    bcs       SSttNetCnReadError
+                    sta       NETCN_O_PORT+1,s
+                    leax      1,x              X now points to hostname bytes
+
+                    lda       NETCN_O_VERSION,s
+                    cmpa      #NETCN_VERSION
+                    bne       SSttNetCnBadArg
+                    lda       NETCN_O_HOSTLEN,s
+                    beq       SSttNetCnBadArg
+                    ldd       NETCN_O_PORT,s
+                    beq       SSttNetCnBadArg
+
+* Required size is fixed header plus hostname length.  Capacity is immediately
+* above the four-byte local header on the system stack.
+                    clra
+                    ldb       NETCN_O_HOSTLEN,s
+                    addd      #NETCN_FIXED_SIZE
+                    cmpd      NETCN_FIXED_SIZE,s
+                    bhi       SSttNetCnBufSmallStack
+
+* Hostname connect is the only N3b connection request form.  Preserve N3a Init
+* compatibility, but refuse SS.NetCn if this backend does not advertise it.
+                    lda       NET_CAPS,y
+                    bita      #NET_CAP_HOSTNAME
+                    beq       SSttNetCnNotReady
+
+* Reject a second/incompatible connection command synchronously.  Link/backend
+* failures remain asynchronous hardware results, matching the native ABI.
+                    lda       NET_STATUS,y
+                    bita      #NET_ST_CONNECTING!NET_ST_CONNECTED!NET_ST_CMD_BUSY
+                    bne       SSttNetCnBusy
+
+* Retire stale edge events from the previous command before starting this one.
+                    lda       #NET_IRQ_LATCHED
+                    sta       NET_IRQ_STATUS,y
+                    lda       NETCN_O_PORT,s
+                    sta       NET_PORT_HI,y
+                    lda       NETCN_O_PORT+1,s
+                    sta       NET_PORT_LO,y
+                    lda       NETCN_O_HOSTLEN,s
+                    sta       NET_HOST_LEN,y
+
+* Reacquire the caller task number after the size calculation used D.  The
+* process cannot resume while this SetStat is executing, so its request buffer
+* remains stable for the duration of this loop.
+                    ldb       P$Task,u
+SSttNetCnHost       os9       F$LDABX
+                    bcs       SSttNetCnHostFault
+                    sta       NET_HOST_DATA,y
+                    leax      1,x
+                    dec       NETCN_O_HOSTLEN,s
+                    bne       SSttNetCnHost
+
+                    lda       #NET_CMD_CONNECT
+                    sta       NET_COMMAND,y
+                    clrb
+                    bra       SSttNetCnDone
+
+* A task-read fault after staging has begun is returned to OS-9 and the native
+* device is reset so a partially loaded hostname cannot leak into a later call.
+SSttNetCnHostFault  lda       #NET_CMD_RESET
+                    sta       NET_COMMAND,y
+                    lda       #NET_IRQ_LATCHED
+                    sta       NET_IRQ_STATUS,y
+                    bra       SSttNetCnCleanupError
+
+SSttNetCnReadError  bra       SSttNetCnCleanupError
+SSttNetCnBadArg     ldb       #E$IllArg
+                    bra       SSttNetCnCleanupError
+SSttNetCnBufSmallStack
+                    ldb       #E$BufSiz
+                    bra       SSttNetCnCleanupError
+SSttNetCnNotReady   ldb       #E$NotRdy
+                    bra       SSttNetCnCleanupError
+SSttNetCnBusy       ldb       #E$DevBsy
+                    bra       SSttNetCnCleanupError
+
+SSttNetCnDone       leas      NETCN_FIXED_SIZE+2,s
+                    puls      y,u
+                    bra       SSttOK
+SSttNetCnCleanupError
+                    leas      NETCN_FIXED_SIZE+2,s
+                    puls      y,u
+                    bra       SSttError
+
+SSttNetCnBufSmall   ldb       #E$BufSiz
+                    bra       SSttError
 
 SSttClose           ldx       V.PORT,u
                     lda       #NET_CMD_CLOSE
@@ -403,6 +543,11 @@ SSttReset           orcc      #IntMasks
                     lda       #NET_IRQ_LATCHED
                     sta       NET_IRQ_STATUS,x
 SSttOK              puls      cc,pc
+
+SSttError           lda       ,s
+                    ora       #Carry
+                    sta       ,s
+                    puls      cc,pc
 
 ********************************************************************
 * WakeReader
