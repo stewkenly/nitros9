@@ -574,6 +574,17 @@ WakeDone            rts
 ********************************************************************
 IRQSvc              pshs      cc,x
                     ldx       V.PORT,u
+
+* F$IRQ polls raw IRQ_STATUS, while the native device asserts CPU IRQ only
+* for IRQ_STATUS & IRQ_MASK.  Reject stale level status observed while the
+* native source is masked; an unrelated system IRQ must continue polling.
+                    lda       NET_IRQ_STATUS,x
+                    anda      NET_IRQ_MASK,x
+                    anda      #NET_IRQ_READ_WAKE
+                    beq       IRQNotOurs
+
+* This device really is requesting service.  Mask all read-wake sources
+* before releasing the waiter so level RX_READY cannot immediately retrigger.
                     lda       NET_IRQ_MASK,x
                     anda      #^NET_IRQ_READ_WAKE
                     sta       NET_IRQ_MASK,x
@@ -582,6 +593,14 @@ IRQSvc              pshs      cc,x
 
 IRQExit             lda       ,s
                     anda      #^Carry
+                    sta       ,s
+                    puls      cc,x,pc
+
+* Raw IRQ_STATUS may remain asserted after this driver's runtime mask is
+* removed.  Carry set tells IOMan this poll-table hit was not the source
+* of the current CPU IRQ and allows polling to continue.
+IRQNotOurs          lda       ,s
+                    ora       #Carry
                     sta       ,s
                     puls      cc,x,pc
 
