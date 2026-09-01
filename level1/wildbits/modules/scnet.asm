@@ -31,6 +31,8 @@
 * Driver policy derived from the shared SuperCoCo contract.
 NET_REQUIRED_CAPS   equ       NET_CAP_TCP!NET_CAP_IRQ
 NET_IRQ_READ_WAKE   equ       NET_IRQ_RX_READY!NET_IRQ_CLOSED!NET_IRQ_ERROR
+NET_IRQ_WRITE_WAKE  equ       NET_IRQ_TX_READY!NET_IRQ_CLOSED!NET_IRQ_ERROR
+NET_IRQ_WAIT_WAKE   equ       NET_IRQ_READ_WAKE!NET_IRQ_TX_READY
 NET_IRQ_LATCHED     equ       NET_IRQ_CONNECT!NET_IRQ_CLOSED!NET_IRQ_ERROR!NET_IRQ_TX_READY
 
 * Device memory begins after SCF manager-owned state.  N3a deliberately
@@ -39,7 +41,7 @@ NET_IRQ_LATCHED     equ       NET_IRQ_CONNECT!NET_IRQ_CLOSED!NET_IRQ_ERROR!NET_I
 MemSize             equ       .
 
 rev                 set       1
-edition             set       2
+edition             set       3
 
                     mod       ModSize,ModName,Drivr+Objct,ReEnt+rev,ModEntry,MemSize
 
@@ -48,11 +50,12 @@ edition             set       2
 ModName             fcs       /scnet/
                     fcb       edition
 
-* F$IRQ polls native IRQ_STATUS.  Only sources that can release a blocked
-* Read are part of this first packet.  Connect/TX events remain masked.
+* F$IRQ polls native IRQ_STATUS.  The packet recognizes every source that
+* can release the single SCF waiter; IRQSvc still requires runtime masking
+* before claiming the OS-9 poll, so inactive raw status cannot steal IRQs.
 IRQPckt             equ       *
                     fcb       $00                 flip byte
-                    fcb       NET_IRQ_READ_WAKE   mask byte
+                    fcb       NET_IRQ_WAIT_WAKE   mask byte
                     fcb       $F1                 priority
 
 ModEntry            lbra      Init
@@ -224,12 +227,12 @@ ReadError           pshs      b
 ********************************************************************
 * CancelWait
 *
-* Called with CPU IRQs masked.  Remove this driver's read-wake sources,
-* clear V.WAKE, and ensure the current process is not left Suspended.
+* Called with CPU IRQs masked.  Remove every source that can release the
+* shared SCF waiter, clear V.WAKE, and leave the process runnable.
 ********************************************************************
 CancelWait          ldx       V.PORT,u
                     lda       NET_IRQ_MASK,x
-                    anda      #^NET_IRQ_READ_WAKE
+                    anda      #^NET_IRQ_WAIT_WAKE
                     sta       NET_IRQ_MASK,x
                     clr       V.WAKE,u
 
@@ -242,9 +245,11 @@ CancelWait          ldx       V.PORT,u
 ********************************************************************
 * Write
 *
-* Write the entry character directly to TX_DATA.  Hardware TX_SPACE is
-* the pacing authority.  A full FIFO uses one-tick polling with normal
-* signal/condemn checks; TX_READY IRQ is not load-bearing in N3a.
+* SUPERCOCO_N3B3_TX_READY_GREEN_V1
+* Write the entry character directly to TX_DATA.  When TX_SPACE is zero,
+* publish the shared SCF waiter, arm TX_READY/CLOSE/ERROR, close the arm race,
+* and remain suspended until IRQSvc releases the process.  TX_READY is a
+* latched full-to-space event, so stale/consumed instances are explicitly W1C.
 ********************************************************************
 Write               clrb
                     pshs      cc,a                stacked char is 1,s
@@ -253,31 +258,88 @@ WriteRetry          orcc      #IntMasks
                     ldx       V.PORT,u
                     ldb       NET_IRQ_STATUS,x
                     bitb      #NET_IRQ_CLOSED
-                    bne       WriteHangup
+                    lbne      WriteHangup
                     bitb      #NET_IRQ_ERROR
-                    bne       WriteHWError
+                    lbne      WriteHWError
                     ldb       NET_STATUS,x
                     bitb      #NET_ST_ERROR
-                    bne       WriteHWError
+                    lbne      WriteHWError
                     bitb      #NET_ST_CONNECTED
-                    beq       WriteNotReady
+                    lbeq      WriteNotReady
                     ldb       NET_TX_SPACE,x
                     bne       WriteNow
 
-                    ldx       #1
+* TX_SPACE is genuinely zero.  Discard any stale TX_READY latch before this
+* waiter is published; the post-arm TX_SPACE recheck below closes the race if
+* a new full-to-space transition occurs while the waiter is being armed.
+                    lda       #NET_IRQ_TX_READY
+                    sta       NET_IRQ_STATUS,x
+
+                    ldd       >D.Proc
+                    sta       V.WAKE,u
+                    tfr       d,x
+                    ldb       P$State,x
+                    orb       #Suspend
+                    stb       P$State,x
+
+                    ldx       V.PORT,u
+                    lda       NET_IRQ_MASK,x
+                    ora       #NET_IRQ_WRITE_WAKE
+                    sta       NET_IRQ_MASK,x
+
+* Close terminal-state and full-to-space races before enabling CPU IRQs.
+                    ldb       NET_IRQ_STATUS,x
+                    bitb      #NET_IRQ_CLOSED
+                    bne       WriteArmedHangup
+                    bitb      #NET_IRQ_ERROR
+                    bne       WriteArmedHWError
+                    ldb       NET_STATUS,x
+                    bitb      #NET_ST_ERROR
+                    bne       WriteArmedHWError
+                    bitb      #NET_ST_CONNECTED
+                    beq       WriteArmedNotReady
+                    ldb       NET_TX_SPACE,x
+                    bne       WriteArmedSpace
+
+                    ldx       #1                  Suspend keeps us parked until wake
                     andcc     #^IntMasks
                     os9       F$Sleep
                     orcc      #IntMasks
 
+* Honor normal NitrOS-9 abort/interrupt signals and condemned processes.
                     ldx       >D.Proc
                     ldb       P$Signal,x
                     beq       WriteChkState
                     cmpb      #S$Intrpt
-                    bls       WriteError
+                    bls       WriteWaitError
 WriteChkState       ldb       P$State,x
                     bitb      #Condem
-                    bne       WriteProcAbort
+                    bne       WriteWaitAbort
                     bra       WriteRetry
+
+* Space appeared after arming but before sleep.  Consume a possible TX_READY
+* race latch, cancel the waiter, and write directly without requiring an IRQ.
+WriteArmedSpace     lda       #NET_IRQ_TX_READY
+                    sta       NET_IRQ_STATUS,x
+                    lbsr      CancelWait
+                    ldx       V.PORT,u
+                    bra       WriteNow
+
+WriteArmedHangup    ldb       #E$HangUp
+                    bra       WriteArmedError
+WriteArmedHWError   ldb       #E$Write
+                    bra       WriteArmedError
+WriteArmedNotReady  ldb       #E$NotRdy
+WriteArmedError     pshs      b
+                    lbsr      CancelWait
+                    puls      b
+                    bra       WriteError
+
+WriteWaitAbort      ldb       #E$PrcAbt
+WriteWaitError      pshs      b
+                    lbsr      CancelWait
+                    puls      b
+                    bra       WriteError
 
 WriteNow            lda       1,s
                     sta       NET_TX_DATA,x
@@ -290,9 +352,6 @@ WriteHWError        ldb       #E$Write
                     bra       WriteError
 
 WriteNotReady       ldb       #E$NotRdy
-                    bra       WriteError
-
-WriteProcAbort      ldb       #E$PrcAbt
 
 WriteError          lda       ,s
                     ora       #Carry
@@ -568,9 +627,9 @@ WakeDone            rts
 ********************************************************************
 * IRQSvc
 *
-* F$IRQ called us because one of NET_IRQ_READ_WAKE matched.  Mask those
-* sources FIRST so a level RX_READY cannot retrigger forever.  Then wake
-* the blocked Level 2 reader, if any.  Payload remains in hardware.
+* F$IRQ called us because one of NET_IRQ_WAIT_WAKE matched.  Runtime-mask
+* qualification below determines whether the native device really owns
+* this system IRQ.  RX_READY remains level-derived; TX_READY is W1C.
 ********************************************************************
 IRQSvc              pshs      cc,x
                     ldx       V.PORT,u
@@ -580,13 +639,17 @@ IRQSvc              pshs      cc,x
 * native source is masked; an unrelated system IRQ must continue polling.
                     lda       NET_IRQ_STATUS,x
                     anda      NET_IRQ_MASK,x
-                    anda      #NET_IRQ_READ_WAKE
+                    anda      #NET_IRQ_WAIT_WAKE
                     beq       IRQNotOurs
 
-* This device really is requesting service.  Mask all read-wake sources
-* before releasing the waiter so level RX_READY cannot immediately retrigger.
-                    lda       NET_IRQ_MASK,x
-                    anda      #^NET_IRQ_READ_WAKE
+* Consume TX_READY if it is the active latched wake.  CLOSED/ERROR stay
+* latched for Read/Write to translate into their normal SCF errors.
+                    bita      #NET_IRQ_TX_READY
+                    beq       IRQMaskWake
+                    lda       #NET_IRQ_TX_READY
+                    sta       NET_IRQ_STATUS,x
+IRQMaskWake         lda       NET_IRQ_MASK,x
+                    anda      #^NET_IRQ_WAIT_WAKE
                     sta       NET_IRQ_MASK,x
 
                     bsr       WakeReader
