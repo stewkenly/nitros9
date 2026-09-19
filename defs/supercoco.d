@@ -223,6 +223,14 @@ SC.VideoStatusActive equ       $01
 SC.VideoStatusPending equ      $02
 SC.VideoStatusError  equ       $04
 
+* R1J surface descriptor layout.
+SC.VideoSurfMBOSlotO     equ       $00
+SC.VideoSurfFormatO      equ       $01
+SC.VideoSurfGenerationO  equ       $02
+SC.VideoSurfOffsetO      equ       $06
+SC.VideoSurfStrideO      equ       $0A
+SC.VideoSurfDescSize     equ       12
+
 * R1K MEDIA Graphics Services V1 discovery and command geometry.
 SC.GraphicsBase      equ       $2900
 SC.GraphicsABIMajor  equ       SC.GraphicsBase+$00
