@@ -1,0 +1,37 @@
+{
+  "schema": "SWAI_PROJECT_V1",
+  "project": {
+    "id": "supercoco-nitros9"
+  },
+  "git": {
+    "remote": "origin",
+    "publish_branch": "feature/supercoco-net0",
+    "force_push": false
+  },
+  "policy": {
+    "allow_create_remote_branch": false,
+    "interactive_safe_default": true
+  },
+  "verify": {
+    "pre_steps": [
+      {
+        "id": "source-recipe-sanity",
+        "class": "SOURCE",
+        "argv": [
+          ".swai/verify-source.sh"
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "post_steps": [
+      {
+        "id": "supercoco-network-retained",
+        "class": "REGRESSION",
+        "argv": [
+          ".swai/verify-supercoco.sh"
+        ],
+        "timeout_seconds": 120
+      }
+    ]
+  }
+}
