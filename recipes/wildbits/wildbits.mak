@@ -81,7 +81,7 @@ LFLAGS += -lfm
 CMDS_EXTRA += $(FM_CMDS)
 endif
 CMDS += $(STDCMDS) shell \
-	bootos9 scfg wbinfo wbreset modem \
+	bootos9 scfg wbinfo scinfo wbreset modem \
 inetd telnet dw httpd $(BASIC09) $(BF) \
 	$(CMDS_EXTRA) wildspeed
 
