@@ -1611,7 +1611,7 @@ L07D9               tfr       x,y                 move window table pointer to Y
 * Exit : B=Internal screen type marker
 L07E0               pshs      a,y                 Preserve sty & window entry
                     inca                          Bump up so $FF type is now 0
-                    cmpa      #9                  Past maximum allowable?
+                    cmpa      #10                 Past maximum allowable? (style 9 is SuperCoCo)
                     bhi       L07F5               Yes, exit with error
                     leay      <L07F9,pc           Point to conversion table (base 0)
                     ldb       a,y                 Get internal code
@@ -1634,6 +1634,11 @@ L07F9               fcb       $ff                 Current screen, sty=$ff
                     fcb       $02                 320 4 color, sty=$06
                     fcb       $03                 640 4 color, sty=$07
                     fcb       $04                 320 16 color, sty=$08
+                    IFNE      H6309
+                    fcb       SCGrfType           SuperCoCo 640x480 INDEX4, sty=$09
+                    ELSE
+                    fcb       $fe                 SuperCoCo requires the HD6309 build
+                    ENDC
 
 BadDef              comb
                     ldb       #E$IllArg

@@ -34,6 +34,7 @@ OS9FORMAT_CMD ?= $(OS9FORMAT_DS40)
 
 AFLAGS += -I.
 AFLAGS += -I$(L2MD)/kernel -I$(L2PMD)
+AFLAGS += -I$(L2CD) -I$(L1D)/wildbits/libs/scsys
 AFLAGS += -I$(L1MD)/kernel -I$(L1MD)
 AFLAGS += $(AFLAGS_EXTRA)
 LFLAGS += -L $(LIBDIR) -lcoco3_6309 -lnet -lalib

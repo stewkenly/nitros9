@@ -369,6 +369,7 @@
                     ifp1
                     use       defsfile
                     use       cocovtio.d
+                    use       supercoco.d
                     endc
 
 GrfStrt             equ       $4000               Position of GRFDRV in it's own task
@@ -472,12 +473,20 @@ L0080               ldb       >WGlobal+g0038      have we been initialized?
                     bmi       L0102               yes, exit
                     coma
                     sta       >WGlobal+g0038      Put it back
+                    IFNE      H6309
+                    lbsr      SCG_INIT            Initialize SuperCoCo backend state once
+                    ENDC
 L0102               clra
                     tfr       a,dp                Set DP to 0 for Wind/CoGrf, which need it there
                     rts                           Return
 
 * Termination routine
-L0104               clr       <gr0038             Clear group #
+L0104               equ       *
+                    IFNE      H6309
+                    lbsr      SCG_TERM
+                    lbcs      L0104SCBad
+                    ENDC
+                    clr       <gr0038             Clear group #
                     clr       <gr007D             Clear buffer block #
                     ldb       <gr0032             Get last block used for GP buffers
                     beq       L0115               If 0, return to system
@@ -486,6 +495,9 @@ L0104               clr       <gr0038             Clear group #
                     bcc       L0104               Keep doing until all are deallocated
                     jmp       >GrfStrt+SysRet     Return to system with error if can't
 
+                    IFNE      H6309
+L0104SCBad          jmp       >GrfStrt+SysRet
+                    ENDC
 L0115               jmp       >GrfStrt+L0F78      Exit system
 
 * Setup GrfDrv memory with data from current window table
@@ -533,6 +545,10 @@ L012B               ldx       Wt.STbl,y           Get screen table ptr
                     sta       <gr0063             Save it for this window
                     ldd       St.Sty,x            Get screen type & first block #
                     sta       <Gr.STYMk           Save screen type for this window
+                    IFNE      H6309
+                    cmpa      #SCGrfType
+                    beq       noneed              MBO-backed screen is not legacy MMU-mapped RAM
+                    ENDC
 * Setup Task 1 MMU for Window: B=Start block # of window
 *   As above, may check start block # to see if our 4 blocks are already
 *   mapped in (just check block # in B with block # in 1st DAT entry).
@@ -579,7 +595,16 @@ L0179               jmp       >GrfStrt+L150C      Update text & gfx cursors if n
 * We MUST have a screen table in order to do St.ScSiz checks (24, 25, 28).
 * GrfDrv is a kernel task (not task switched), so we point X to the possible
 * screen table
-L019D               ldx       Wt.STbl,y           get screen table ptr
+L019D               equ       *
+                    IFNE      H6309
+                    lda       <Gr.STYMk
+                    cmpa      #SCGrfType
+                    lbne      L019DLegacy
+                    lbsr      SCG_DWSET
+                    jmp       >GrfStrt+SysRet
+L019DLegacy         equ       *
+                    ENDC
+                    ldx       Wt.STbl,y           get screen table ptr
                     bpl       L01A0               hi bit clear, already allocated so skip ahead
                     lbsr      FScrTbl             hi bit SET ($FFFF); find/allocate a new screen table entry
                     bcs       L01C5               exit on error
@@ -605,7 +630,7 @@ L01B0               lbsr      L0268               Go set up a new screen table (
 * All window creates come here
 L01B5               equ       *
                     IFNE      H6309
-                    bsr       L0129               go setup data & MMU for new window
+                    lbsr      L0129               go setup data & MMU for new window
                     ELSE
                     lbsr      L0129
                     ENDC
@@ -1116,7 +1141,14 @@ L03A9               lbsr      L0581               Go set up window/character siz
 *   Darling's 'christmas' patch. It is supposed to have something to do
 *   with INIZ'ed but not screen allocated windows. Or maybe something with
 *   overlapping windows?
-L03CB               lbsr      L0177               Go map in window
+L03CB               equ       *
+                    IFNE      H6309
+                    ldx       Wt.STbl,y
+                    lda       St.Sty,x
+                    cmpa      #SCGrfType
+                    lbeq      SCG_DWEND_ENTRY
+                    ENDC
+                    lbsr      L0177               Go map in window
                     ldd       #$FFFF              Set screen table ptr to indicate not active
                     std       Wt.STbl,y
 * This routine checks to see if we are the last window on the current screen
@@ -1761,7 +1793,21 @@ L079B               ldb       Wt.Fore,y           Get foreground palette #
 * Select entry point
 * Entry: Y=Newly selected window pointer
 * ATD: !! Save DP, too.
-L07D7               pshs      y                   save Window table ptr we will be going to
+L07D7               equ       *
+                    IFNE      H6309
+                    ldx       Wt.STbl,y
+                    lda       St.Sty,x
+                    cmpa      #SCGrfType
+                    lbeq      SCG_SELECT_WINDOW
+                    lda       <grSCFlags
+                    bita      #SCG.FlagVideo
+                    beq       L07D7Legacy
+                    lbsr      SCG_HIDE_FOR_LEGACY
+                    bcc       L07D7Legacy
+                    jmp       >GrfStrt+SysRet
+L07D7Legacy         equ       *
+                    ENDC
+                    pshs      y                   save Window table ptr we will be going to
                     ldy       <gr002E             get window table ptr we are going from
                     beq       L07E1               If none, skip ahead
                     lbsr      L0177               set variables/MMU & update cursors on old window
@@ -7384,6 +7430,12 @@ L1F95               ldx       <gr0066             Get current pattern's buffer p
                     lslb                          Multiply by 4 to calculate which line within
                     lslb                          Pattern buffer we want (since 32 pixels/line)
                     rts
+
+                    IFNE      H6309
+* S1 source-level common service helpers plus the S2 GIME-NG lifecycle backend.
+                    use       scsys.inc
+                    use       scgrf.inc
+                    ENDC
 
                     emod
 eom                 equ       *

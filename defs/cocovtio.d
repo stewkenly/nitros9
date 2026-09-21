@@ -853,6 +853,37 @@ grCrPMsk            RMB       1                   Used in font routine - Current
 grDbCMsk            RMB       2                   Used for word size color mask for Logic routines
 grRsrved            RMB       256-.               Reserved for future use
 
+* SuperCoCo S2B GrfDrv private state lives entirely inside the historical
+* reserved tail above.  These are aliases only; the GrfDrv DP size/layout
+* seen by legacy code is unchanged.
+grSCFlags           EQU       grRsrved+$00
+grSCFB0Start        EQU       grRsrved+$01
+grSCFB1Start        EQU       grRsrved+$03
+grSCGen0            EQU       grRsrved+$05
+grSCGen1            EQU       grRsrved+$09
+grSCMapAddr         EQU       grRsrved+$0D
+grSCCurrentBlock    EQU       grRsrved+$0F
+grSCBlocksLeft      EQU       grRsrved+$11
+grSCMBOBase         EQU       grRsrved+$12
+grSCMBOStart        EQU       grRsrved+$14
+grSCGenPtr          EQU       grRsrved+$16
+grSCPPN             EQU       grRsrved+$18
+grSCPagesLeft       EQU       grRsrved+$1A
+grSCSlot            EQU       grRsrved+$1B
+grSCFlagMask        EQU       grRsrved+$1C
+grSCSurfaceBase     EQU       grRsrved+$1D
+grSCSurfaceGenPtr   EQU       grRsrved+$1F
+grSCSurfaceSlot     EQU       grRsrved+$21
+grSCPaletteLeft     EQU       grRsrved+$22
+grSCBack            EQU       grRsrved+$23
+grSCScreenTbl       EQU       grRsrved+$24
+
+SCG.FlagRAM0        EQU       $01
+SCG.FlagRAM1        EQU       $02
+SCG.FlagMBO0        EQU       $04
+SCG.FlagMBO1        EQU       $08
+SCG.FlagVideo       EQU       $10
+
 * GPLoad buffer - $1200 in system block    . Currently ends at $1247, and $1248-$127f is unused
 GPBuf               EQU       $1200               Useful address (start of GP buffer copy memory)
 GPBufSz             RMB       gb0000              common move buffer for gpload/get/put (72 bytes default)
@@ -1019,6 +1050,8 @@ Protect             EQU       %00000001           device window protection (both
 *****************************************************************************
 * Screen types (high bit set=hardware text, else graphics) in GRFDRV
 Current             EQU       $ff                 Current screen
+SCGrfStyle          EQU       $09                 CoWin external style 9: SuperCoCo 640x480 INDEX4
+SCGrfType           EQU       $07                 GrfDrv internal type; intercepted before legacy tables
 *         equ   1          640x200x2
 *         equ   2          320x200x4
 *         equ   3          640x200x4
