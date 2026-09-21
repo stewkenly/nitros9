@@ -1,11 +1,13 @@
 # SuperCoCo Community Alpha - S1B shared `scsys` layer
 
-Status: candidate software integration checkpoint
+Status: RETAINED CHECKPOINT - incorporated into S1 CLOSED / ACCEPTED
 
 Base NitrOS-9 branch: `feature/supercoco-net0`
 Base commit: `a8220376d7caf02af1c150766feff4ca77cca231`
 Executable machine target: XRoar R1L `cdebeb172b8147b615fc8e96c3f0b7b0fdcaaf06`
 Frozen architecture target: `e240a509f2caa0ececc6855767612933e2d3036e`
+
+Closure record: `docs/SUPERCOCO_S1_COMMON_SYSTEM_LAYER.md`
 
 ## Purpose
 

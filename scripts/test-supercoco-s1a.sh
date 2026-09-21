@@ -4,11 +4,10 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 expected='afc18e25c3b3691b0d2859a34a045eefddc2338f'
-actual="$(git rev-parse HEAD)"
-[[ "$actual" == "$expected" ]] || {
-    echo "FAIL: expected S1A base $expected, found $actual" >&2
+if ! git merge-base --is-ancestor "$expected" HEAD; then
+    echo "FAIL: candidate is not descended from S1A checkpoint $expected" >&2
     exit 1
-}
+fi
 
 command -v lwasm >/dev/null 2>&1 || { echo 'FAIL: lwasm not found' >&2; exit 1; }
 

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO="$(git rev-parse --show-toplevel)"
+
+"$REPO/scripts/test-supercoco-s1.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

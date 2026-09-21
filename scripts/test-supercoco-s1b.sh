@@ -4,11 +4,10 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 expected='a8220376d7caf02af1c150766feff4ca77cca231'
-actual="$(git rev-parse HEAD)"
-[[ "$actual" == "$expected" ]] || {
-    echo "FAIL: expected S1B base $expected, found $actual" >&2
+if ! git merge-base --is-ancestor "$expected" HEAD; then
+    echo "FAIL: candidate is not descended from S1B checkpoint $expected" >&2
     exit 1
-}
+fi
 
 for tool in lwasm lwlink; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool not found" >&2; exit 1; }
