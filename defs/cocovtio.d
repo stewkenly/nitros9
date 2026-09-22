@@ -889,6 +889,7 @@ SCG.FlagMBO1        EQU       $08
 SCG.FlagVideo       EQU       $10
 SCG.FlagRAMCmd      EQU       $20
 SCG.FlagMBOCmd      EQU       $40
+SCG.FlagMirrorDirty EQU       $80
 
 * GPLoad buffer - $1200 in system block    . Currently ends at $1247, and $1248-$127f is unused
 GPBuf               EQU       $1200               Useful address (start of GP buffer copy memory)

@@ -1684,6 +1684,18 @@ L0697               lbsr      L0930               Go search graphics buffers for
 * FColor entry point
 L0707               ldb       [Wt.STbl,y]         Get screen type from screen table
                     stb       <Gr.STYMk           Save as current screen type
+                    IFNE      H6309
+                    cmpb      #SCGrfType
+                    lbne      L0707Legacy
+                    ldb       <gr005A             INDEX4 foreground palette index
+                    andb      #$0F
+                    stb       Wt.Fore,y
+                    clr       <gr00A9             Invalidate cached window setup
+                    clrb
+                    andcc     #^Carry
+                    jmp       >GrfStrt+SysRet
+L0707Legacy         equ       *
+                    ENDC
                     ldb       <gr005A             Get palette number from user
                     bsr       L074C               Go get mask for it
                     stb       Wt.Fore,y           Save foreground palette #
@@ -5959,7 +5971,22 @@ L1790               lbsr      I.Line              internal line/bar/box setup
 L17F9               jmp       >GrfStrt+SysRet
 
 * Bar entry point
-L17FB               lbsr      I.Line              internal line/bar/box routine
+L17FB               equ       *
+                    IFNE      H6309
+                    pshs      x
+                    ldx       Wt.STbl,y
+                    cmpx      #$FFFF
+                    lbeq      L17FBLegacyDrop
+                    lda       St.Sty,x
+                    cmpa      #SCGrfType
+                    lbne      L17FBLegacyDrop
+                    puls      x
+                    lbsr      SCG_BAR_ENTRY
+                    jmp       >GrfStrt+SysRet
+L17FBLegacyDrop     puls      x
+L17FBLegacy         equ       *
+                    ENDC
+                    lbsr      I.Line              internal line/bar/box routine
                     bcs       L1853               Error, return with it
                     lbsr      L16A3               Make sure X coords in right order
                     lbsr      L1716               Make sure Y coords in right order

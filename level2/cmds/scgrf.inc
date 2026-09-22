@@ -115,6 +115,7 @@ SCG_DWSET           pshs      x,y,u
                     lda       #(TChr!Protect)
                     sta       Wt.BSW,y
                     clr       Wt.LSet,y
+                    clr       Wt.PBlk,y
 
                     lbsr      SCG_ALLOCATE
                     lbcs      SCG_DW_FAIL
@@ -657,6 +658,40 @@ SCG_PALETTE         fcb       $00,$00,$00
                     fcb       $FF,$FF,$FF
 
 ********************************************************************
+* S2B-3 normal BAR backend.
+* CoWin has already copied the current draw pointer to gr0047/gr0049 and the
+* destination to gr004B/gr004D.  Reuse GrfDrv's normal scale/range checks and
+* coordinate normalization, then issue one semantic R1K rectangle operation.
+* Pattern and logical-set variants remain explicitly deferred.
+********************************************************************
+SCG_BAR_ENTRY       lda       <grSCFlags
+                    bita      #SCG.FlagMirrorDirty
+                    lbne      SCG_BAR_BAD
+                    tst       Wt.PBlk,y
+                    lbne      SCG_BAR_BAD
+                    tst       Wt.LSet,y
+                    lbne      SCG_BAR_BAD
+
+                    lbsr      L1DFD               Scale/check destination X/Y
+                    lbcs      SCG_BAR_RETURN
+                    lbsr      L1DF6               Scale/check current X/Y
+                    lbcs      SCG_BAR_RETURN
+                    lbsr      L16A3               Normalize X low..high
+                    lbsr      L1716               Normalize Y low..high
+
+                    lda       Wt.Fore,y
+                    anda      #$0F
+                    sta       <grSCColor
+                    lbsr      SCG_RENDER_RECT
+                    lbcs      SCG_BAR_BAD
+                    clrb
+                    andcc     #^Carry
+SCG_BAR_RETURN      rts
+SCG_BAR_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
 * S2B-2 normal CLS backend.
 * Entry: Y = current style-9 window table.
 ********************************************************************
@@ -668,19 +703,19 @@ SCG_CLS_ENTRY       lda       Wt.Back,y
                     std       Wt.Cur,y
                     std       Wt.CurX,y
                     std       Wt.CurY,y
-                    std       <gr0047
-                    std       <gr0049
+                    std       <gr0047             rectangle left = 0
+                    std       <gr0049             rectangle top = 0
                     sta       Wt.FMsk,y
                     sta       <gr00A9
+                    ldd       #639
+                    std       <gr004B             rectangle right
+                    ldd       #479
+                    std       <gr004D             rectangle bottom
                     lda       #SCGrfType
                     sta       <Gr.STYMk
-* Production path returns normal GrfDrv readiness failure on any backend
-* error.  Detailed fault classes were used only during V4/V5 diagnosis.
-                    lbsr      SCG_BUILD_FILL
-                    lbcs      SCG_CLS_BAD
-                    lbsr      SCG_SUBMIT_FILL
-                    lbcs      SCG_CLS_BAD
-                    lbsr      SCG_PRESENT_BACK
+* A full-screen overwrite is also the recovery operation for any conservative
+* mirror-dirty state left by an earlier failed partial transaction.
+                    lbsr      SCG_RENDER_RECT
                     lbcs      SCG_CLS_BAD
                     clrb
                     andcc     #^Carry
@@ -744,19 +779,64 @@ SCG_BF_GENCOPY      lda       ,u+
                     sta       15,x
 
                     ldx       <grSCMapAddr
-                    lda       #$80
-                    sta       SC.GfxCmdWidthO,x
-                    lda       #$02
+* Destination X/Y are the normalized inclusive upper-left coordinates.
+                    ldd       <gr0047
+                    stb       SC.GfxCmdDstXO,x
+                    sta       SC.GfxCmdDstXO+1,x
+                    ldd       <gr0049
+                    stb       SC.GfxCmdDstYO,x
+                    sta       SC.GfxCmdDstYO+1,x
+* Convert inclusive end coordinates to width/height.
+                    ldd       <gr004B
+                    subd      <gr0047
+                    incd
+                    stb       SC.GfxCmdWidthO,x
                     sta       SC.GfxCmdWidthO+1,x
-                    lda       #$E0
-                    sta       SC.GfxCmdHeightO,x
-                    lda       #$01
+                    ldd       <gr004D
+                    subd      <gr0049
+                    incd
+                    stb       SC.GfxCmdHeightO,x
                     sta       SC.GfxCmdHeightO+1,x
 
                     lbsr      SCG_T1_RESTORE
                     clrb
                     andcc     #^Carry
                     puls      x,y,u,pc
+
+********************************************************************
+* Execute one semantic rectangle while preserving the mirrored-buffer
+* invariant.  grSCBack names the hidden surface on entry.  First render there,
+* flip it visible at VBLANK, then replay the same operation into the now-hidden
+* old front.  The dirty bit remains set on any failure; a later full CLS can
+* safely recover because it overwrites both buffers completely.
+********************************************************************
+SCG_RENDER_RECT     lda       <grSCFlags
+                    ora       #SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+
+                    lbsr      SCG_BUILD_FILL
+                    lbcs      SCG_RR_BAD
+                    lbsr      SCG_SUBMIT_FILL
+                    lbcs      SCG_RR_BAD
+                    lbsr      SCG_PRESENT_BACK
+                    lbcs      SCG_RR_BAD
+
+* SCG_PRESENT_BACK toggled grSCBack, so this second command targets the old
+* front, which is now hidden.  No second display commit is required.
+                    lbsr      SCG_BUILD_FILL
+                    lbcs      SCG_RR_BAD
+                    lbsr      SCG_SUBMIT_FILL
+                    lbcs      SCG_RR_BAD
+
+                    lda       <grSCFlags
+                    anda      #^SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+                    clrb
+                    andcc     #^Carry
+                    rts
+SCG_RR_BAD          ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
 
 ********************************************************************
 * Submit command MBO slot 2 / record 0 through MEDIA Job V1 and wait until
