@@ -821,9 +821,28 @@ SCG_RENDER_RECT     lda       <grSCFlags
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_RR_BAD
 
-* SCG_PRESENT_BACK toggled grSCBack, so this second command targets the old
-* front, which is now hidden.  No second display commit is required.
+* Full-screen overwrite remains the recovery primitive from S2B-3.  Keep its
+* second FILL independent of BLIT so CLS can recover a dirty mirror even if
+* BLIT itself is the operation that previously failed.
+                    ldd       <gr0047
+                    lbne      SCG_RR_MIRROR_BLIT
+                    ldd       <gr0049
+                    lbne      SCG_RR_MIRROR_BLIT
+                    ldd       <gr004B
+                    cmpd      #639
+                    lbne      SCG_RR_MIRROR_BLIT
+                    ldd       <gr004D
+                    cmpd      #479
+                    lbne      SCG_RR_MIRROR_BLIT
                     lbsr      SCG_BUILD_FILL
+                    lbra      SCG_RR_MIRROR_SUBMIT
+
+* For a partial operation, the just-presented front contains the authoritative
+* complete image.  Copy that full image to the newly hidden old front with R1K
+* BLIT.  VIDEO and MEDIA may concurrently hold READ bindings on the source MBO;
+* R1I BUSY is a binding count, not an exclusive lock.
+SCG_RR_MIRROR_BLIT  lbsr      SCG_BUILD_MIRROR_BLIT
+SCG_RR_MIRROR_SUBMIT
                     lbcs      SCG_RR_BAD
                     lbsr      SCG_SUBMIT_FILL
                     lbcs      SCG_RR_BAD
@@ -837,6 +856,114 @@ SCG_RENDER_RECT     lda       <grSCFlags
 SCG_RR_BAD          ldb       #E$NotRdy
                     orcc      #Carry
                     rts
+
+********************************************************************
+* S2B-4 full-frame mirror BLIT.
+* After SCG_PRESENT_BACK, grSCBack names the newly hidden old front and
+* grSCBack^1 names the visible authoritative front.  Build a 640x480 BLIT
+* from visible -> hidden.  The command MBO and both framebuffer MBOs already
+* carry the required MEDIA authority.
+********************************************************************
+SCG_BUILD_MIRROR_BLIT
+                    pshs      x,y,u
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    stx       <grSCMapAddr
+                    ldy       #64
+                    clra
+SCG_BMB_ZERO        sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_BMB_ZERO
+
+                    ldx       <grSCMapAddr
+                    lda       #1
+                    sta       SC.GfxCmdABIMajorO,x
+                    lda       #SC.GraphicsOpBlit
+                    sta       SC.GfxCmdOperationO,x
+
+* Source descriptor = visible front = grSCBack XOR 1.
+                    leax      SC.GfxCmdSourceO,x
+                    lda       <grSCBack
+                    eora      #1
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCBack
+                    eora      #1
+                    lbeq      SCG_BMB_SGEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_BMB_SGENCOPY
+SCG_BMB_SGEN0       ldu       #GrfMem+grSCGen0
+SCG_BMB_SGENCOPY    lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #$E0
+                    sta       14,x
+                    lda       #$01
+                    sta       15,x
+
+* Destination descriptor = current hidden back = grSCBack.
+                    ldx       <grSCMapAddr
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCBack
+                    lbeq      SCG_BMB_DGEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_BMB_DGENCOPY
+SCG_BMB_DGEN0       ldu       #GrfMem+grSCGen0
+SCG_BMB_DGENCOPY    lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #$E0
+                    sta       14,x
+                    lda       #$01
+                    sta       15,x
+
+* Command record was zeroed, so SRC_X/SRC_Y/DST_X/DST_Y are all zero.
+* width = 640 ($0280), height = 480 ($01E0), little endian.
+                    ldx       <grSCMapAddr
+                    lda       #$80
+                    sta       SC.GfxCmdWidthO,x
+                    lda       #$02
+                    sta       SC.GfxCmdWidthO+1,x
+                    lda       #$E0
+                    sta       SC.GfxCmdHeightO,x
+                    lda       #$01
+                    sta       SC.GfxCmdHeightO+1,x
+
+                    lbsr      SCG_T1_RESTORE
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
 
 ********************************************************************
 * Submit command MBO slot 2 / record 0 through MEDIA Job V1 and wait until
