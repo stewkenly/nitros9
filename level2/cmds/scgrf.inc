@@ -19,6 +19,10 @@ SCG.FBPages         equ       38
 SCG.FBBytes         equ       $2000
 SCG.SlotFB0         equ       0
 SCG.SlotFB1         equ       1
+SCG.SlotCmd         equ       2
+SCG.CmdBlocks       equ       1
+SCG.CmdPages        equ       1
+SCG.CmdBytes        equ       $2000
 
 ********************************************************************
 * Initialize private state.  Called only on the first GrfDrv init.
@@ -29,6 +33,9 @@ SCG_INIT            clra
                     std       <grSCScreenTbl
                     std       <grSCFB0Start
                     std       <grSCFB1Start
+                    std       <grSCCmdStart
+                    std       <grSCGenCmd
+                    std       <grSCGenCmd+2
                     rts
 
 ********************************************************************
@@ -56,6 +63,8 @@ SCG_DWSET           pshs      x,y,u
                     lbsr      SC_PROBE_R1L
                     lbcs      SCG_DW_BAD
                     lbsr      SCG_PROBE_VIDEO
+                    lbcs      SCG_DW_BAD
+                    lbsr      SCG_PROBE_GRAPHICS
                     lbcs      SCG_DW_BAD
 
 * Allocate one normal NitrOS screen-table entry, but mark its legacy RAM block
@@ -109,6 +118,8 @@ SCG_DWSET           pshs      x,y,u
 
                     lbsr      SCG_ALLOCATE
                     lbcs      SCG_DW_FAIL
+                    lbsr      SCG_CLEAR_CMD
+                    lbcs      SCG_DW_FAIL
                     ldd       <grSCFB0Start
                     lbsr      SCG_CLEAR_FB
                     lbcs      SCG_DW_FAIL
@@ -118,6 +129,8 @@ SCG_DWSET           pshs      x,y,u
                     lbsr      SCG_PROGRAM_MBO0
                     lbcs      SCG_DW_FAIL
                     lbsr      SCG_PROGRAM_MBO1
+                    lbcs      SCG_DW_FAIL
+                    lbsr      SCG_PROGRAM_CMD_MBO
                     lbcs      SCG_DW_FAIL
                     lbsr      SCG_PROGRAM_SURFACE0
                     lbcs      SCG_DW_FAIL
@@ -172,6 +185,68 @@ SCG_PV_BAD          ldb       #E$NotRdy
                     rts
 
 ********************************************************************
+* Verify the exact R1K graphics service geometry consumed by S2B-2.
+********************************************************************
+SCG_PROBE_GRAPHICS  ldx       #SC.GraphicsABIMajor
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #1
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsABIMinor
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    tsta
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsCaps0
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+* Required here: FILL_RECT, MBO surfaces, command snapshot, MEDIA event.
+                    anda      #%01011001
+                    cmpa      #%01011001
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsMediaSlot
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #3
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsJobOpcode
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #SC.GraphicsOpcode
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsCmdSize
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #64
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsAlignShift
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #6
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsFormat
+                    lbsr      SC_READ8
+                    lbcs      SCG_PG_BAD
+                    cmpa      #SC.GraphicsFmtIndex4
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsMaxWLo
+                    lbsr      SC_READ16LE
+                    lbcs      SCG_PG_BAD
+                    cmpd      #640
+                    lbne      SCG_PG_BAD
+                    ldx       #SC.GraphicsMaxHLo
+                    lbsr      SC_READ16LE
+                    lbcs      SCG_PG_BAD
+                    cmpd      #480
+                    lbne      SCG_PG_BAD
+                    clrb
+                    andcc     #^Carry
+                    rts
+SCG_PG_BAD          ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
 * Two independent Level-2 RAM objects.
 ********************************************************************
 SCG_ALLOCATE        ldb       #SCG.FBBlocks
@@ -189,6 +264,14 @@ SCG_ALLOCATE        ldb       #SCG.FBBlocks
                     lda       <grSCFlags
                     ora       #SCG.FlagRAM1
                     sta       <grSCFlags
+
+                    ldb       #SCG.CmdBlocks
+                    os9       F$AllRAM
+                    lbcs      SCG_ALLOC_BAD
+                    std       <grSCCmdStart
+                    lda       <grSCFlags
+                    ora       #SCG.FlagRAMCmd
+                    sta       <grSCFlags
                     clrb
                     andcc     #^Carry
                     rts
@@ -196,33 +279,44 @@ SCG_ALLOC_BAD       orcc      #Carry
                     rts
 
 ********************************************************************
+* GrfDrv executes in Task 1.  F$MapBlk edits the current process DAT image,
+* so it is not the mapping seam for memory GrfDrv itself accesses.  Reuse the
+* established Task-1 GP scratch window: $FFA9 maps one 8K block at $2000.
+* Entry B = physical 8K block.  Exit X = $2000.
+********************************************************************
+SCG_T1_MAP_BLOCK    lda       <gr0087+2
+                    sta       <grSCMapSave
+                    lda       <gr0087+3
+                    sta       <grSCMapSave+1
+                    clr       <gr0087+2
+                    stb       <gr0087+3
+                    stb       >$FFA9
+                    ldx       #$2000
+                    rts
+
+SCG_T1_RESTORE      lda       <grSCMapSave
+                    sta       <gr0087+2
+                    lda       <grSCMapSave+1
+                    sta       <gr0087+3
+                    sta       >$FFA9
+                    rts
+
+********************************************************************
 * Entry D = first 8K physical block.  Clear all 19 owned blocks before they
 * become visible to VIDEO or writable by MEDIA.
 ********************************************************************
-SCG_CLEAR_FB        pshs      y,u
+SCG_CLEAR_FB        pshs      x,y,u
                     std       <grSCCurrentBlock
                     lda       #SCG.FBBlocks
                     sta       <grSCBlocksLeft
-SCG_CF_BLOCK        ldx       <grSCCurrentBlock
-                    ldb       #1
-                    pshs      u
-                    os9       F$MapBlk
-                    lbcs      SCG_CF_MAP_BAD
-                    tfr       u,x
-                    puls      u
-                    stx       <grSCMapAddr
+SCG_CF_BLOCK        ldb       <grSCCurrentBlock+1
+                    lbsr      SCG_T1_MAP_BLOCK
                     ldy       #SCG.FBBytes
                     clra
 SCG_CF_BYTE         sta       ,x+
                     leay      -1,y
                     lbne      SCG_CF_BYTE
-
-                    pshs      u
-                    ldu       <grSCMapAddr
-                    ldb       #1
-                    os9       F$ClrBlk
-                    lbcs      SCG_CF_UNMAP_BAD
-                    puls      u
+                    lbsr      SCG_T1_RESTORE
 
                     ldd       <grSCCurrentBlock
                     addd      #1
@@ -231,13 +325,23 @@ SCG_CF_BYTE         sta       ,x+
                     lbne      SCG_CF_BLOCK
                     clrb
                     andcc     #^Carry
-                    puls      y,u,pc
-SCG_CF_MAP_BAD      puls      u
-                    orcc      #Carry
-                    puls      y,u,pc
-SCG_CF_UNMAP_BAD    puls      u
-                    orcc      #Carry
-                    puls      y,u,pc
+                    puls      x,y,u,pc
+
+********************************************************************
+* Clear the dedicated 8K command block before publishing its first 4K page.
+********************************************************************
+SCG_CLEAR_CMD       pshs      x,y,u
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    ldy       #SCG.CmdBytes
+                    clra
+SCG_CC_BYTE         sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_CC_BYTE
+                    lbsr      SCG_T1_RESTORE
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
 
 ********************************************************************
 * MBO publication.  Framebuffers are already provisioned for the later R1K
@@ -365,6 +469,86 @@ SCG_PM_BAD          ldb       #E$NotRdy
                     rts
 
 ********************************************************************
+* Dedicated R1K command MBO.  Only the first 4K page is exposed; record 0
+* occupies bytes 0..63.  MEDIA receives READ authority only.
+********************************************************************
+SCG_PROGRAM_CMD_MBO ldb       #SCG.SlotCmd
+                    lbsr      SCG_PREP_SLOT
+                    lbcs      SCG_PCM_BAD
+
+                    ldd       #SC.MBOObjectBase+(SCG.SlotCmd*SC.MBOObjectStride)
+                    std       <grSCMBOBase
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOPermissionsO,x
+                    lda       #SC.MBOPermRead
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOConsumersO,x
+                    lda       #SC.MBOConsumerMedia
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+
+* logical length = one 4K MBO page
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOLengthO,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+                    leax      1,x
+                    lda       #$10
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOPageCountO,x
+                    lda       #SCG.CmdPages
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PCM_BAD
+
+* First 4K PPN is twice the NitrOS 8K physical block number.
+                    ldd       <grSCCmdStart
+                    lslb
+                    rola
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOPageListO,x
+                    lbsr      SC_WRITE16LE
+                    lbcs      SCG_PCM_BAD
+
+* Mark potentially live before COMMIT because timeout does not prove reject.
+                    lda       <grSCFlags
+                    ora       #SCG.FlagMBOCmd
+                    sta       <grSCFlags
+                    ldb       #SCG.SlotCmd
+                    lbsr      SC_MBO_COMMIT
+                    lbcs      SCG_PCM_BAD
+                    ldb       #SCG.SlotCmd
+                    lbsr      SC_MBO_STATUS
+                    lbcs      SCG_PCM_BAD
+                    bita      #SC.MBOStatusValid
+                    lbeq      SCG_PCM_BAD
+
+                    ldx       <grSCMBOBase
+                    leax      SC.MBOGenerationO,x
+                    ldu       #GrfMem+grSCGenCmd
+                    lbsr      SC_READ32LE
+                    lbcs      SCG_PCM_BAD
+                    clrb
+                    andcc     #^Carry
+                    rts
+SCG_PCM_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
 * Surface descriptors.
 ********************************************************************
 SCG_PROGRAM_SURFACE0
@@ -471,6 +655,304 @@ SCG_PALETTE         fcb       $00,$00,$00
                     fcb       $FF,$55,$FF
                     fcb       $FF,$FF,$55
                     fcb       $FF,$FF,$FF
+
+********************************************************************
+* S2B-2 normal CLS backend.
+* Entry: Y = current style-9 window table.
+********************************************************************
+SCG_CLS_ENTRY       lda       Wt.Back,y
+                    anda      #$0F
+                    sta       <grSCColor
+                    clra
+                    clrb
+                    std       Wt.Cur,y
+                    std       Wt.CurX,y
+                    std       Wt.CurY,y
+                    std       <gr0047
+                    std       <gr0049
+                    sta       Wt.FMsk,y
+                    sta       <gr00A9
+                    lda       #SCGrfType
+                    sta       <Gr.STYMk
+* Production path returns normal GrfDrv readiness failure on any backend
+* error.  Detailed fault classes were used only during V4/V5 diagnosis.
+                    lbsr      SCG_BUILD_FILL
+                    lbcs      SCG_CLS_BAD
+                    lbsr      SCG_SUBMIT_FILL
+                    lbcs      SCG_CLS_BAD
+                    lbsr      SCG_PRESENT_BACK
+                    lbcs      SCG_CLS_BAD
+                    clrb
+                    andcc     #^Carry
+                    rts
+SCG_CLS_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
+* Build Graphics Command V1 record 0 in the dedicated command MBO.
+********************************************************************
+SCG_BUILD_FILL      pshs      x,y,u
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    stx       <grSCMapAddr
+                    ldy       #64
+                    clra
+SCG_BF_ZERO         sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_BF_ZERO
+
+                    ldx       <grSCMapAddr
+                    lda       #1
+                    sta       SC.GfxCmdABIMajorO,x
+                    lda       #SC.GraphicsOpFill
+                    sta       SC.GfxCmdOperationO,x
+                    lda       <grSCColor
+                    sta       SC.GfxCmdColorO,x
+
+* Destination descriptor: current back MBO, INDEX4, generation, offset 0,
+* stride 320, width 640, height 480.
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCBack
+                    lbeq      SCG_BF_GEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_BF_GENCOPY
+SCG_BF_GEN0         ldu       #GrfMem+grSCGen0
+SCG_BF_GENCOPY      lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #$E0
+                    sta       14,x
+                    lda       #$01
+                    sta       15,x
+
+                    ldx       <grSCMapAddr
+                    lda       #$80
+                    sta       SC.GfxCmdWidthO,x
+                    lda       #$02
+                    sta       SC.GfxCmdWidthO+1,x
+                    lda       #$E0
+                    sta       SC.GfxCmdHeightO,x
+                    lda       #$01
+                    sta       SC.GfxCmdHeightO+1,x
+
+                    lbsr      SCG_T1_RESTORE
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+
+********************************************************************
+* Submit command MBO slot 2 / record 0 through MEDIA Job V1 and wait until
+* COMPLETE.  W1C MEDIA event and Job ACK are deliberately independent.
+********************************************************************
+SCG_SUBMIT_FILL     pshs      x,y,u
+* Initial channel state and descriptor staging.
+                    ldx       #SC.MediaJobBase+SC.JobStateO
+                    lbsr      SC_READ8
+                    lbcs      SCG_SF_BAD
+                    cmpa      #SC.JobIdle
+                    lbne      SCG_SF_BAD
+
+                    lda       #SC.IRQMedia
+                    lbsr      SC_IRQ_ACK
+
+                    ldx       #SC.MediaJobBase+SC.JobOpcodeO
+                    lda       #SC.GraphicsOpcode
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+* Deterministic tag $B202, little endian.
+                    leax      1,x
+                    lda       #$02
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    lda       #$B2
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+* ARG0 = command MBO slot 2, high byte reserved zero.
+                    leax      1,x
+                    lda       #SCG.SlotCmd
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+* ARG1/ARG2 = command MBO generation little endian.
+                    leax      1,x
+                    lda       <grSCGenCmd
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    lda       <grSCGenCmd+1
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    lda       <grSCGenCmd+2
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    lda       <grSCGenCmd+3
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+* ARG3 = record index 0.
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+* Legacy Job V1 buffer descriptors must be zero.
+                    ldx       #SC.MediaJobBase+SC.JobBuf0O
+SCG_SF_ZBUF         clra
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    leax      1,x
+                    cmpx      #SC.MediaJobBase+SC.JobBufEndO+1
+                    lblo      SCG_SF_ZBUF
+
+* Submit only after the complete descriptor has been staged.
+                    ldx       #SC.MediaJobBase+SC.JobControlO
+                    lda       #SC.JobCtlSubmit
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+
+* Doorbell accepted; poll until the MEDIA job reaches a terminal state.
+                    ldy       #$FFFF
+SCG_SF_WAIT         ldx       #SC.MediaJobBase+SC.JobStateO
+                    lbsr      SC_READ8
+                    lbcs      SCG_SF_BAD
+                    cmpa      #SC.JobComplete
+                    lbeq      SCG_SF_COMPLETE
+                    cmpa      #SC.JobErrorState
+                    lbeq      SCG_SF_TERM_BAD
+                    cmpa      #SC.JobPending
+                    lbeq      SCG_SF_NEXT
+                    cmpa      #SC.JobBusy
+                    lbne      SCG_SF_BAD
+SCG_SF_NEXT         leay      -1,y
+                    lbne      SCG_SF_WAIT
+                    lbra      SCG_SF_BAD
+
+* Terminal ERROR: clear the independent event, ACK the channel, fail.
+SCG_SF_TERM_BAD     lda       #SC.IRQMedia
+                    lbsr      SC_IRQ_ACK
+                    ldx       #SC.MediaJobBase+SC.JobControlO
+                    lda       #SC.JobCtlAck
+                    lbsr      SC_WRITE8
+                    lbra      SCG_SF_BAD
+
+* COMPLETE: validate result/event and preserve independent W1C + Job ACK.
+SCG_SF_COMPLETE     ldx       #SC.MediaJobBase+SC.JobResultO
+                    lbsr      SC_READ8
+                    lbcs      SCG_SF_ACK_BAD
+                    tsta
+                    lbne      SCG_SF_ACK_BAD
+                    lbsr      SC_IRQ_GET
+                    bita      #SC.IRQMedia
+                    lbeq      SCG_SF_ACK_BAD
+                    lda       #SC.IRQMedia
+                    lbsr      SC_IRQ_ACK
+* Event clear must not clear Job COMPLETE.
+                    ldx       #SC.MediaJobBase+SC.JobStateO
+                    lbsr      SC_READ8
+                    lbcs      SCG_SF_ACK_BAD
+                    cmpa      #SC.JobComplete
+                    lbne      SCG_SF_ACK_BAD
+                    ldx       #SC.MediaJobBase+SC.JobControlO
+                    lda       #SC.JobCtlAck
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_SF_BAD
+                    ldx       #SC.MediaJobBase+SC.JobStateO
+                    lbsr      SC_READ8
+                    lbcs      SCG_SF_BAD
+                    cmpa      #SC.JobIdle
+                    lbne      SCG_SF_BAD
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+
+* Best-effort terminal ACK on malformed completion protocol.
+SCG_SF_ACK_BAD      ldx       #SC.MediaJobBase+SC.JobControlO
+                    lda       #SC.JobCtlAck
+                    lbsr      SC_WRITE8
+SCG_SF_BAD          orcc      #Carry
+                    puls      x,y,u,pc
+
+********************************************************************
+* Atomically expose the completed back buffer at VBLANK, then swap roles.
+********************************************************************
+SCG_PRESENT_BACK    pshs      x,y
+                    lda       <grSCFlags
+                    bita      #SCG.FlagVideo
+                    lbeq      SCG_PB_BAD
+
+* VIDEO is a periodic VBLANK event while GIME-NG scanout is active.  It is
+* therefore a wakeup, not a unique completion token for this DISPLAY_COMMIT.
+* Clear the currently latched event, submit the bundle, then tolerate a stale
+* or unrelated VBLANK and fence on the authoritative active-surface state.
+                    lda       #SC.IRQVideo
+                    lbsr      SC_IRQ_ACK
+                    ldx       #SC.VideoStageEnable
+                    lda       #1
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PB_BAD
+                    ldx       #SC.VideoStageSurface
+                    lda       <grSCBack
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PB_BAD
+                    ldx       #SC.VideoControl
+                    lda       #SC.VideoCtlCommit
+                    lbsr      SC_WRITE8
+                    lbcs      SCG_PB_BAD
+
+* A VBLANK may have occurred after the W1C above but before DISPLAY_COMMIT.
+* In that case the first observed event belongs to the old surface.  Wait for
+* up to four VBLANK observations and accept only when the requested surface is
+* actually active.  SCG_WAIT_VIDEO preserves Y.
+                    ldy       #4
+SCG_PB_WAIT_ACTIVE  lbsr      SCG_WAIT_VIDEO
+                    lbcs      SCG_PB_BAD
+                    ldx       #SC.VideoActiveSurface
+                    lbsr      SC_READ8
+                    lbcs      SCG_PB_BAD
+                    cmpa      <grSCBack
+                    lbeq      SCG_PB_ACTIVE
+                    leay      -1,y
+                    lbne      SCG_PB_WAIT_ACTIVE
+                    lbra      SCG_PB_BAD
+SCG_PB_ACTIVE       lda       <grSCBack
+                    eora      #1
+                    sta       <grSCBack
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,pc
+SCG_PB_BAD          ldb       #E$NotRdy
+                    orcc      #Carry
+                    puls      x,y,pc
 
 ********************************************************************
 * VBLANK event wait.
@@ -626,8 +1108,18 @@ SCG_RM_BAD          ldb       #E$NotRdy
 * Free RAM only after no consumer authority remains.
 ********************************************************************
 SCG_FREE_RAM        lda       <grSCFlags
-                    bita      #SCG.FlagMBO0!SCG.FlagMBO1!SCG.FlagVideo
+                    bita      #SCG.FlagMBO0!SCG.FlagMBO1!SCG.FlagMBOCmd!SCG.FlagVideo
                     lbne      SCG_FR_BAD
+                    bita      #SCG.FlagRAMCmd
+                    lbeq      SCG_FR_1
+                    ldx       <grSCCmdStart
+                    ldb       #SCG.CmdBlocks
+                    os9       F$DelRAM
+                    lbcs      SCG_FR_BAD
+                    lda       <grSCFlags
+                    anda      #^SCG.FlagRAMCmd
+                    sta       <grSCFlags
+SCG_FR_1            lda       <grSCFlags
                     bita      #SCG.FlagRAM1
                     lbeq      SCG_FR_0
                     ldx       <grSCFB1Start
@@ -660,6 +1152,10 @@ SCG_FR_BAD          ldb       #E$NotRdy
 SCG_CLEANUP         pshs      x,y
                     lbsr      SCG_DISABLE
                     lbcs      SCG_CL_BAD
+                    lda       #SCG.FlagMBOCmd
+                    ldb       #SCG.SlotCmd
+                    lbsr      SCG_REVOKE_MBO
+                    lbcs      SCG_CL_BAD
                     lda       #SCG.FlagMBO1
                     ldb       #SCG.SlotFB1
                     lbsr      SCG_REVOKE_MBO
@@ -679,6 +1175,9 @@ SCG_CL_NO_TABLE     clra
                     std       <grSCScreenTbl
                     std       <grSCFB0Start
                     std       <grSCFB1Start
+                    std       <grSCCmdStart
+                    std       <grSCGenCmd
+                    std       <grSCGenCmd+2
                     sta       <grSCBack
                     sta       <grSCFlags
                     andcc     #^Carry

@@ -1706,6 +1706,18 @@ L0719               ldb       <gr005A             get palette register number
 * BColor entry point
 L0726               ldb       [Wt.STbl,y]         Get screen type from screen table
                     stb       <Gr.STYMk           Save as current screen type
+                    IFNE      H6309
+                    cmpb      #SCGrfType
+                    lbne      L0726Legacy
+                    ldb       <gr005A             INDEX4 background palette index
+                    andb      #$0F
+                    stb       Wt.Back,y
+                    clr       <gr00A9             Invalidate cached window setup
+                    clrb
+                    andcc     #^Carry
+                    jmp       >GrfStrt+SysRet
+L0726Legacy         equ       *
+                    ENDC
                     ldb       <gr005A             get palette register #
                     bsr       L074C
                     stb       Wt.Back,y           save background into window table
@@ -4275,13 +4287,32 @@ L1186               lbsr      L0FFF               Set up font sizes (and font if
                     ldd       <gr0047             Get X coord
                     std       Wt.CurX,y           Move into window table
                     ENDC
-                    bsr       NewEnt              Originally bsr L11D1 (redundant)
+                    lbsr      NewEnt              S2B-2 layout-only branch-range repair
 L11CA               jmp       >GrfStrt+L0F78      Exit out of grfdrv w/o error
 
 * Control code processor
 * Entry: A=ctrl code
 * ATD: 69 bytes old method, 47 new method
-L1129               lbsr      L0FFF               Set up font sizes (and font if on gfx screen)
+L1129               equ       *
+                    IFNE      H6309
+                    cmpa      #$0C                Normal CLS control code?
+                    lbne      L1129Legacy
+                    pshs      a,x
+                    ldx       Wt.STbl,y
+                    cmpx      #$FFFF
+                    lbeq      L1129SCNot
+                    lda       St.Sty,x
+                    cmpa      #SCGrfType
+                    lbne      L1129SCNot
+                    puls      a,x
+                    lbsr      SCG_CLS_ENTRY
+                    lbcc      L1129SCOK
+                    jmp       >GrfStrt+SysRet
+L1129SCOK           jmp       >GrfStrt+L0F78
+L1129SCNot          puls      a,x
+L1129Legacy         equ       *
+                    ENDC
+                    lbsr      L0FFF               Set up font sizes (and font if on gfx screen)
                     deca                          make 1-D = 0-C
                     bmi       L1130               if 0 or smaller, exit
                     cmpa      #$0D                too high? (now 0-C instead of 1-D)
