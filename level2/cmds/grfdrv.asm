@@ -3568,9 +3568,34 @@ NoScroll            equ       *
 
 * entry: A = number of characters at $0180 to write (32 max/6809, 64 max/6309)
 *        Y = window table pointer
-fast.chr            ldx       #FstGrfBf           ($0180) Point to data for buffered write
+fast.chr            sta       <gr0082+1           ($83) save count before renderer selection
+                    IFNE      H6309
+                    ldx       Wt.STbl,y           inspect the target window before consuming char 0
+                    cmpx      #$FFFF
+                    lbeq      SCG_FC_LEGACY       no screen table yet; preserve accepted path
+                    lda       St.Sty,x
+                    cmpa      #SCGrfType
+                    lbne      SCG_FC_LEGACY
+
+* Style 9 owns the complete buffered transaction.  L0F4B.1 performs the same
+* normal per-character setup used by single-character output, while the saved
+* X value keeps the buffered source pointer private to this caller.
+                    ldx       #FstGrfBf
+SCG_FC_NEXT         lda       ,x+
+                    pshs      x
+                    lbsr      L0F4B.1
+                    lbcs      SCG_FC_BAD
+                    puls      x
+                    dec       <gr0082+1
+                    lbne      SCG_FC_NEXT
+                    lbra      L0F78
+SCG_FC_BAD          puls      x                   unwind caller-owned buffer pointer
+                    lbra      SysRet               top-level buffered-write error return
+
+SCG_FC_LEGACY       equ       *
+                    ENDC
+                    ldx       #FstGrfBf           ($0180) accepted S2B-4 buffered-write path
 * ATD: $83 is unused by anything as far as I can tell.
-                    sta       <gr0082+1           ($83) save count of characters to do for later
                     lda       ,x+                 get the first character
                     pshs      x                   save address of character
                     lbsr      L0F4B.1             ensure window is set up properly during 1st chr.
@@ -3699,6 +3724,13 @@ L0F4B.1             lbsr      L0175               Switch to the window we are wr
 Not8Wd              bpl       L0F4D               Yes, skip adjusting
 L0F4B.2             bsr       txt.fixa            fix A: adds 10 cycles for slow puts and gfx puts
 L0F4D               ldb       <Gr.STYMk           Get screen type
+                    IFNE      H6309
+                    cmpb      #SCGrfType
+                    lbne      L0F4DLegacy
+                    lbsr      SCG_ALPHA_ENTRY     R1K-backed fixed 8x8 style-9 alpha output
+                    rts                           preserve backend Carry/B for the caller
+L0F4DLegacy         tstb                          restore sign test clobbered by CMPB
+                    ENDC
                     bpl       L0F73               If gfx  screen, go do it
                     bsr       L0F7C               hardware text; go print it on-screen
                     fcb       $8C                 skip the next 2 bytes (cmpx # opcode)
@@ -3737,6 +3769,16 @@ L0F6B               rts
 * save us lots of cycles later!
 * Single character out Alpha Put entry point
 L0F4B               bsr       L0F4B.1             do internal alpha-put routine
+                    IFNE      H6309
+                    bcc       L0F78
+                    pshs      cc                  preserve backend Carry while classifying target
+                    lda       <Gr.STYMk
+                    cmpa      #SCGrfType
+                    lbne      L0F4BSCNot
+                    puls      cc
+                    lbra      SysRet               top-level style-9 error return
+L0F4BSCNot          puls      cc                  legacy internal Carry remains ignored
+                    ENDC
 * Return to the system without any errors
 L0F78               clrb                          No errors
 * Return to system (Jumps to [D.Flip0] with X=system stack ptr & A=CC status)

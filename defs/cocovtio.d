@@ -881,6 +881,8 @@ grSCCmdStart        EQU       grRsrved+$26
 grSCGenCmd          EQU       grRsrved+$28
 grSCColor           EQU       grRsrved+$2C
 grSCMapSave         EQU       grRsrved+$2D
+grSCGlyphRows       EQU       grRsrved+$2E        S2B-5: 8 raw fixed-font rows (+$2E..+$35)
+grSCMaskKey         EQU       grRsrved+$36        S2B-5: MASKED_BLIT chroma key (last reserved byte)
 
 SCG.FlagRAM0        EQU       $01
 SCG.FlagRAM1        EQU       $02

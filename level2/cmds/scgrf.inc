@@ -23,6 +23,8 @@ SCG.SlotCmd         equ       2
 SCG.CmdBlocks       equ       1
 SCG.CmdPages        equ       1
 SCG.CmdBytes        equ       $2000
+SCG.CmdRecord1      equ       64
+SCG.GlyphOffset     equ       128
 
 ********************************************************************
 * Initialize private state.  Called only on the first GrfDrv init.
@@ -116,6 +118,11 @@ SCG_DWSET           pshs      x,y,u
                     sta       Wt.BSW,y
                     clr       Wt.LSet,y
                     clr       Wt.PBlk,y
+                    clr       Wt.FBlk,y
+                    ldd       #Grp.Fnt*256+Fnt.S8x8
+                    std       <gr0057
+                    lbsr      L0643               bind normal fixed 8x8 system font
+                    lbcs      SCG_DW_FAIL
 
                     lbsr      SCG_ALLOCATE
                     lbcs      SCG_DW_FAIL
@@ -804,6 +811,302 @@ SCG_BF_GENCOPY      lda       ,u+
                     puls      x,y,u,pc
 
 ********************************************************************
+* S2B-5 fixed 8x8 style-9 alpha text.
+*
+* Entry: A = adjusted character code, Y = window table pointer.
+* L1002 has already selected/mapped the font and cached its buffer pointer.
+* This bounded seam deliberately rejects proportional/bold/underline/inverse/
+* scaled text and any character whose post-draw advance would require a scroll.
+* Control-code scrolling is the next S2 text milestone; no style-9 alpha path
+* is allowed to fall into the legacy MMU framebuffer writer.
+********************************************************************
+SCG_ALPHA_ENTRY     sta       <grSCMaskKey        temporary character save
+                    lda       <grSCFlags
+                    bita      #SCG.FlagMirrorDirty
+                    lbne      SCG_ALPHA_BAD
+
+                    ldd       <gr006E
+                    cmpd      #8
+                    lbne      SCG_ALPHA_BAD
+                    ldd       <gr0070
+                    cmpd      #8
+                    lbne      SCG_ALPHA_BAD
+                    lda       Wt.BSW,y
+                    anda      #(Prop!Scale!Bold!Under!Invers)
+                    lbne      SCG_ALPHA_BAD
+
+* Destination must contain a complete 8x8 glyph.  Preflight the cursor advance
+* as well, so the operation fails before drawing if the next position would
+* require the still-deferred style-9 scrolling path.
+                    ldd       Wt.CurX,y
+                    cmpd      #632
+                    lbhi      SCG_ALPHA_BAD
+                    cmpd      #624
+                    lbls      SCG_ALPHA_YFIT
+                    ldd       Wt.CurY,y
+                    cmpd      #464
+                    lbhi      SCG_ALPHA_BAD
+                    lbra      SCG_ALPHA_CURSOR_OK
+SCG_ALPHA_YFIT      ldd       Wt.CurY,y
+                    cmpd      #472
+                    lbhi      SCG_ALPHA_BAD
+SCG_ALPHA_CURSOR_OK
+
+* Resolve the current fixed-font character while its GP-buffer block is still
+* mapped at $2000.  Copy the eight 1bpp rows into the last historical GrfDrv
+* reserved bytes before mapping the command MBO over that Task-1 window.
+                    ldx       <gr00AF+1
+                    lbeq      SCG_ALPHA_BAD
+                    ldb       Grf.XBSz,x
+                    cmpb      #8
+                    lbne      SCG_ALPHA_BAD
+                    lda       <grSCMaskKey
+                    mul
+                    cmpd      Grf.BSz,x
+                    lbhs      SCG_ALPHA_BAD
+                    leax      d,x
+                    leax      Grf.Siz,x
+                    ldu       #GrfMem+grSCGlyphRows
+                    ldb       #8
+SCG_ALPHA_COPY      lda       ,x+
+                    sta       ,u+
+                    decb
+                    lbne      SCG_ALPHA_COPY
+
+                    lbsr      SCG_RENDER_GLYPH
+                    rts
+SCG_ALPHA_BAD       ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
+* Build Graphics Command V1 MASKED_BLIT record 0 and its 8x8 INDEX4 source
+* tile at command-MBO offset 128.  Font bit 7 is the left-most pixel.
+*
+* Transparent text (TChr clear) stages foreground or chroma-key pixels so the
+* key leaves destination pixels untouched.  Opaque text stages foreground or
+* background; its key is chosen distinct from both, making the same primitive
+* behave as a complete glyph copy without changing the R1K ABI.
+********************************************************************
+SCG_BUILD_MASKED_GLYPH
+                    pshs      x,y,u
+                    lda       Wt.Fore,y
+                    anda      #$0F
+                    sta       <grSCFlagMask       foreground nibble
+                    lda       Wt.Back,y
+                    anda      #$0F
+                    sta       <grSCPagesLeft      temporary background nibble
+
+                    lda       Wt.BSW,y
+                    bita      #TChr
+                    lbne      SCG_BMG_OPAQUE
+* Transparent: XOR with $F guarantees a key distinct from foreground.
+                    lda       <grSCFlagMask
+                    eora      #$0F
+                    sta       <grSCMaskKey
+                    sta       <grSCSlot           zero font bits stage the key
+                    lbra      SCG_BMG_KEY_READY
+
+* Opaque: select the first palette index not equal to foreground/background.
+SCG_BMG_OPAQUE      clra
+SCG_BMG_KEY_LOOP    cmpa      <grSCFlagMask
+                    lbeq      SCG_BMG_KEY_NEXT
+                    cmpa      <grSCPagesLeft
+                    lbne      SCG_BMG_KEY_FOUND
+SCG_BMG_KEY_NEXT    inca
+                    lbra      SCG_BMG_KEY_LOOP
+SCG_BMG_KEY_FOUND   sta       <grSCMaskKey
+                    lda       <grSCPagesLeft
+                    sta       <grSCSlot           zero font bits stage background
+SCG_BMG_KEY_READY
+
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    stx       <grSCMapAddr
+                    pshs      y                   preserve window pointer across record clear
+                    ldy       #64
+                    clra
+SCG_BMG_ZERO        sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_BMG_ZERO
+                    puls      y
+
+* Expand eight 1bpp font rows into 32 bytes of INDEX4 source pixels.
+                    ldx       <grSCMapAddr
+                    leax      SCG.GlyphOffset,x
+                    ldu       #GrfMem+grSCGlyphRows
+                    lda       #8
+                    sta       <grSCPagesLeft
+SCG_BMG_ROW         lda       ,u+
+                    sta       <grScrtch
+                    ldb       #4
+SCG_BMG_PAIR        lda       <grSCSlot
+                    lsla
+                    lsla
+                    lsla
+                    lsla
+                    sta       <grScrtch+1
+                    asl       <grScrtch
+                    lbcc      SCG_BMG_HIGH_DONE
+                    lda       <grSCFlagMask
+                    lsla
+                    lsla
+                    lsla
+                    lsla
+                    sta       <grScrtch+1
+SCG_BMG_HIGH_DONE   asl       <grScrtch
+                    lbcc      SCG_BMG_LOW_FILL
+                    lda       <grSCFlagMask
+                    lbra      SCG_BMG_LOW_MERGE
+SCG_BMG_LOW_FILL    lda       <grSCSlot
+SCG_BMG_LOW_MERGE   ora       <grScrtch+1
+                    sta       ,x+
+                    decb
+                    lbne      SCG_BMG_PAIR
+                    dec       <grSCPagesLeft
+                    lbne      SCG_BMG_ROW
+
+* Command record 0.
+                    ldx       <grSCMapAddr
+                    lda       #1
+                    sta       SC.GfxCmdABIMajorO,x
+                    lda       #SC.GraphicsOpMasked
+                    sta       SC.GfxCmdOperationO,x
+                    lda       <grSCMaskKey
+                    sta       SC.GfxCmdColorO,x
+
+* Source descriptor = command MBO slot 2, byte offset 128, stride 4, 8x8.
+                    leax      SC.GfxCmdSourceO,x
+                    lda       #SCG.SlotCmd
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCGenCmd
+                    sta       2,x
+                    lda       <grSCGenCmd+1
+                    sta       3,x
+                    lda       <grSCGenCmd+2
+                    sta       4,x
+                    lda       <grSCGenCmd+3
+                    sta       5,x
+                    lda       #$80
+                    sta       6,x
+                    clr       7,x
+                    clr       8,x
+                    clr       9,x
+                    lda       #4
+                    sta       10,x
+                    clr       11,x
+                    lda       #8
+                    sta       12,x
+                    clr       13,x
+                    sta       14,x
+                    clr       15,x
+
+* Destination descriptor = current hidden back framebuffer.
+                    ldx       <grSCMapAddr
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCBack
+                    lbeq      SCG_BMG_DGEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_BMG_DGEN_COPY
+SCG_BMG_DGEN0       ldu       #GrfMem+grSCGen0
+SCG_BMG_DGEN_COPY   lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    clr       6,x
+                    clr       7,x
+                    clr       8,x
+                    clr       9,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #$E0
+                    sta       14,x
+                    lda       #$01
+                    sta       15,x
+
+* Source X/Y remain zero.  Destination is the current alpha cursor.
+                    ldx       <grSCMapAddr
+                    ldd       Wt.CurX,y
+                    stb       SC.GfxCmdDstXO,x
+                    sta       SC.GfxCmdDstXO+1,x
+                    ldd       Wt.CurY,y
+                    stb       SC.GfxCmdDstYO,x
+                    sta       SC.GfxCmdDstYO+1,x
+                    lda       #8
+                    sta       SC.GfxCmdWidthO,x
+                    clr       SC.GfxCmdWidthO+1,x
+                    sta       SC.GfxCmdHeightO,x
+                    clr       SC.GfxCmdHeightO+1,x
+
+                    lbsr      SCG_T1_RESTORE
+                    clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+
+********************************************************************
+* Render one glyph transaction and restore the mirrored-buffer invariant.
+********************************************************************
+SCG_RENDER_GLYPH    lda       <grSCFlags
+                    ora       #SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+
+                    lbsr      SCG_BUILD_MASKED_GLYPH
+                    lbcs      SCG_RG_BAD
+                    lbsr      SCG_SUBMIT_FILL     MASKED_BLIT record 0
+                    lbcs      SCG_RG_BAD
+                    lbsr      SCG_PRESENT_BACK
+                    lbcs      SCG_RG_BAD
+                    lbsr      SCG_BUILD_MIRROR_BLIT_R1
+                    lbcs      SCG_RG_BAD
+                    lbsr      SCG_SUBMIT_RECORD1  mirror BLIT record 1
+                    lbcs      SCG_RG_BAD
+
+                    lda       <grSCFlags
+                    anda      #^SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+                    lbsr      SCG_ALPHA_ADVANCE
+                    rts
+SCG_RG_BAD          ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
+* Fixed 8x8 style-9 cursor advance.  Preflight in SCG_ALPHA_ENTRY guarantees
+* this never needs the still-deferred legacy scroll path.
+********************************************************************
+SCG_ALPHA_ADVANCE   ldd       Wt.CurX,y
+                    addd      #8
+                    std       Wt.CurX,y
+                    cmpd      #632
+                    lbls      SCG_AA_SYNC
+                    clrd
+                    std       Wt.CurX,y
+                    ldd       Wt.CurY,y
+                    addd      #8
+                    std       Wt.CurY,y
+SCG_AA_SYNC         ldq       Wt.CurX,y
+                    stq       <gr0047
+                    clrb
+                    andcc     #^Carry
+                    rts
+
+********************************************************************
 * Execute one semantic rectangle while preserving the mirrored-buffer
 * invariant.  grSCBack names the hidden surface on entry.  First render there,
 * flip it visible at VBLANK, then replay the same operation into the now-hidden
@@ -865,9 +1168,18 @@ SCG_RR_BAD          ldb       #E$NotRdy
 * carry the required MEDIA authority.
 ********************************************************************
 SCG_BUILD_MIRROR_BLIT
-                    pshs      x,y,u
+                    clr       <grSCSlot           ordinary mirror command uses record 0
+                    lbra      SCG_BMB_ENTRY
+SCG_BUILD_MIRROR_BLIT_R1
+                    lda       #1                  alpha mirror preserves MASKED_BLIT record 0
+                    sta       <grSCSlot
+SCG_BMB_ENTRY       pshs      x,y,u
                     ldb       <grSCCmdStart+1
                     lbsr      SCG_T1_MAP_BLOCK
+                    lda       <grSCSlot
+                    lbeq      SCG_BMB_RECORD_READY
+                    leax      SCG.CmdRecord1,x
+SCG_BMB_RECORD_READY
                     stx       <grSCMapAddr
                     ldy       #64
                     clra
@@ -969,7 +1281,11 @@ SCG_BMB_DGENCOPY    lda       ,u+
 * Submit command MBO slot 2 / record 0 through MEDIA Job V1 and wait until
 * COMPLETE.  W1C MEDIA event and Job ACK are deliberately independent.
 ********************************************************************
-SCG_SUBMIT_FILL     pshs      x,y,u
+SCG_SUBMIT_FILL     clr       <grSCSlot
+                    lbra      SCG_SUBMIT_RECORD
+SCG_SUBMIT_RECORD1  lda       #1
+                    sta       <grSCSlot
+SCG_SUBMIT_RECORD   pshs      x,y,u
 * Initial channel state and descriptor staging.
                     ldx       #SC.MediaJobBase+SC.JobStateO
                     lbsr      SC_READ8
@@ -1023,9 +1339,10 @@ SCG_SUBMIT_FILL     pshs      x,y,u
                     lda       <grSCGenCmd+3
                     lbsr      SC_WRITE8
                     lbcs      SCG_SF_BAD
-* ARG3 = record index 0.
+* ARG3 = explicit 64-byte command record index (0 for existing work, 1 for
+* the alpha mirror BLIT).
                     leax      1,x
-                    clra
+                    lda       <grSCSlot
                     lbsr      SC_WRITE8
                     lbcs      SCG_SF_BAD
                     leax      1,x
