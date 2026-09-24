@@ -57,8 +57,14 @@ need('level2/cmds/scgrf.inc', 'SCG_BUILD_MASKED_GLYPH')
 need('level2/cmds/scgrf.inc', 'lda       #SC.GraphicsOpMasked')
 need('level2/cmds/scgrf.inc', 'SCG_RETARGET_MASKED_BACK')
 need('level2/cmds/scgrf.inc', 'replay same 8x8 MASKED_BLIT into new hidden back')
-forbid('level2/cmds/scgrf.inc', 'lbsr      SCG_BUILD_MIRROR_BLIT_R1')
-forbid('level2/cmds/scgrf.inc', 'lbsr      SCG_SUBMIT_RECORD1  mirror BLIT record 1')
+src = Path('level2/cmds/scgrf.inc').read_text()
+render_start = src.index('SCG_RENDER_GLYPH')
+render_end = src.index('SCG_ALPHA_ADVANCE', render_start)
+render = src[render_start:render_end]
+for token in ('lbsr      SCG_BUILD_MIRROR_BLIT_R1',
+              'lbsr      SCG_SUBMIT_RECORD1  mirror BLIT record 1'):
+    if token in render:
+        raise SystemExit(f'FAIL: per-glyph alpha renderer restored superseded full-frame mirror: {token}')
 need('level2/cmds/scgrf.inc', 'ldd       #Grp.Fnt*256+Fnt.S8x8')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', "alphaA              fcb       'A'")
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'alphaBC             fcc       /BC/')

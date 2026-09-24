@@ -80,6 +80,9 @@ msgSingleLen        equ       *-msgSingle
 msgBuffered         fcc       /S2B5 R1K BUFFERED BC PASS/
                     fcb       C$CR
 msgBufferedLen      equ       *-msgBuffered
+msgBatch            fcc       /S2B6 BUFFERED BATCH COMMIT PASS/
+                    fcb       C$CR
+msgBatchLen         equ       *-msgBatch
 msgMirror           fcc       /S2B5 R1K MIRROR PASS/
                     fcb       C$CR
 msgMirrorLen        equ       *-msgMirror
@@ -196,8 +199,17 @@ start               clr       winOpen,u
                     lda       #1
                     os9       I$WritLn
 
+* Two buffered glyphs now produce one present, so the active surface must be
+* the opposite of the single-A surface captured by verifyCommands.  verifyFront
+* also updates activeSurf to the newly visible surface for the command witness.
                     lbsr      verifyFront
                     lbcs      failCleanup
+                    lbsr      verifyBatchCommands
+                    lbcs      failCleanup
+                    leax      msgBatch,pcr
+                    ldy       #msgBatchLen
+                    lda       #1
+                    os9       I$WritLn
                     leax      msgMirror,pcr
                     ldy       #msgMirrorLen
                     lda       #1
@@ -587,14 +599,123 @@ vbfMapBad           puls      u
                     lbra      vbfBad
 
 ********************************************************************
+* Buffered-batch command witness after BC.
+* activeSurf is the current front, updated by verifyFront immediately before
+* this call.  Record 0 is the last hidden-draw MASKED_BLIT (C at x=16) and now
+* names the visible front.  Record 1 is the one final 640x480 front-to-hidden
+* mirror issued after the single batch present.
+********************************************************************
+verifyBatchCommands pshs      x,y,u
+                    ldb       #2
+                    lbsr      SC_MBO_BASE
+                    lbcs      vbcBad
+                    leax      SC.MBOPageListO,x
+                    lbsr      SC_READ16LE
+                    lbcs      vbcBad
+                    bitb      #$01
+                    lbne      vbcBad
+                    lsra
+                    rorb
+                    tfr       d,x
+                    pshs      u
+                    ldb       #1
+                    os9       F$MapBlk
+                    lbcs      vbcMapBad
+                    tfr       u,x
+                    ldy       ,s                  original program-static U
+                    stx       cmdMap,y
+
+* Record 0 is the last glyph command and still targets the batch surface that
+* just became visible.  C begins at x=16, y=0 and remains 8x8 INDEX4.
+                    lda       SC.GfxCmdABIMajorO,x
+                    cmpa      #1
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdOperationO,x
+                    cmpa      #SC.GraphicsOpMasked
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdDestO,x
+                    cmpa      activeSurf,y
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdDestO+1,x
+                    cmpa      #SC.GraphicsFmtIndex4
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdDstXO,x
+                    cmpd      #$1000              x=16 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdDstYO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdWidthO,x
+                    cmpd      #$0800
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdHeightO,x
+                    cmpd      #$0800
+                    lbne      vbcMappedBad
+
+* Record 1 is exactly one final full-frame mirror from current front to hidden.
+                    ldx       cmdMap,y
+                    leax      64,x
+                    lda       SC.GfxCmdABIMajorO,x
+                    cmpa      #1
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdOperationO,x
+                    cmpa      #SC.GraphicsOpBlit
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdSourceO,x
+                    cmpa      activeSurf,y
+                    lbne      vbcMappedBad
+                    lda       activeSurf,y
+                    eora      #1
+                    cmpa      SC.GfxCmdDestO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSrcXO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSrcYO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdDstXO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdDstYO,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdWidthO,x
+                    cmpd      #$8002              width 640 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdHeightO,x
+                    cmpd      #$E001              height 480 little endian
+                    lbne      vbcMappedBad
+
+                    ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+                    lbcs      vbcInnerBad
+                    puls      u
+                    puls      x,y,u
+                    clrb
+                    andcc     #^Carry
+                    rts
+vbcMappedBad        ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+vbcInnerBad         puls      u
+vbcBad              puls      x,y,u
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+vbcMapBad           puls      u
+                    lbra      vbcBad
+
+********************************************************************
 * Completion/ownership state after the alpha transaction.
 ********************************************************************
 verifyFront         pshs      x,y,u
                     ldx       #SC.VideoActiveSurface
                     lbsr      SC_READ8
                     lbcs      vfBad
+* A two-character buffered write used to present twice and return to the same
+* surface.  Batched presentation must toggle exactly once relative to single A.
+                    eora      #1
                     cmpa      activeSurf,u
                     lbne      vfBad
+                    eora      #1
+                    sta       activeSurf,u        retain the current front for ownership checks
                     ldx       #SC.MediaJobBase+SC.JobStateO
                     lbsr      SC_READ8
                     lbcs      vfBad

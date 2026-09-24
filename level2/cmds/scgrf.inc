@@ -823,7 +823,13 @@ SCG_BF_GENCOPY      lda       ,u+
 SCG_ALPHA_ENTRY     sta       <grSCMaskKey        temporary character save
                     lda       <grSCFlags
                     bita      #SCG.FlagMirrorDirty
-                    lbne      SCG_ALPHA_BAD
+                    lbeq      SCG_ALPHA_DIRTY_OK
+* A buffered batch deliberately holds MirrorDirty between hidden glyph draws.
+* fast.chr refuses to start a batch when MirrorDirty was already set, so a
+* negative count here can only belong to the current governed transaction.
+                    tst       <gr0082+1
+                    lbpl      SCG_ALPHA_BAD
+SCG_ALPHA_DIRTY_OK
 
                     ldd       <gr006E
                     cmpd      #8
@@ -1070,6 +1076,8 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
                     lbcs      SCG_RG_BAD
                     lbsr      SCG_SUBMIT_FILL     MASKED_BLIT record 0 into hidden back
                     lbcs      SCG_RG_BAD
+                    tst       <gr0082+1
+                    lbmi      SCG_RG_BATCH         buffered write defers present/mirror to one final commit
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_RG_BAD
                     lbsr      SCG_RETARGET_MASKED_BACK
@@ -1080,7 +1088,7 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
                     lda       <grSCFlags
                     anda      #^SCG.FlagMirrorDirty
                     sta       <grSCFlags
-                    lbsr      SCG_ALPHA_ADVANCE
+SCG_RG_BATCH        lbsr      SCG_ALPHA_ADVANCE
                     rts
 SCG_RG_BAD          ldb       #E$NotRdy
                     orcc      #Carry
@@ -1136,6 +1144,37 @@ SCG_AA_SYNC         ldq       Wt.CurX,y
                     stq       <gr0047
                     clrb
                     andcc     #^Carry
+                    rts
+
+********************************************************************
+* Commit one completed buffered-alpha batch.
+*
+* Every glyph has already completed on the same hidden back surface.  Present
+* that accumulated surface once, then restore the mirrored-buffer invariant
+* with one full-frame record-1 BLIT.  A tells fast.chr whether a failure
+* occurred before (A=0) or after (A=1) the new front became authoritative.
+********************************************************************
+SCG_ALPHA_BATCH_COMMIT
+                    lbsr      SCG_PRESENT_BACK
+                    lbcs      SCG_ABC_PRE_BAD
+                    lbsr      SCG_BUILD_MIRROR_BLIT_R1
+                    lbcs      SCG_ABC_POST_BAD
+                    lbsr      SCG_SUBMIT_RECORD1
+                    lbcs      SCG_ABC_POST_BAD
+                    lda       <grSCFlags
+                    anda      #^SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+                    clra
+                    clrb
+                    andcc     #^Carry
+                    rts
+SCG_ABC_PRE_BAD     clra                          visible front did not change
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+SCG_ABC_POST_BAD    lda       #1                  present succeeded; keep advanced logical cursor
+                    ldb       #E$NotRdy
+                    orcc      #Carry
                     rts
 
 ********************************************************************

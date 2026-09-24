@@ -3577,20 +3577,83 @@ fast.chr            sta       <gr0082+1           ($83) save count before render
                     cmpa      #SCGrfType
                     lbne      SCG_FC_LEGACY
 
-* Style 9 owns the complete buffered transaction.  L0F4B.1 performs the same
-* normal per-character setup used by single-character output, while the saved
-* X value keeps the buffered source pointer private to this caller.
+* Style 9 owns the complete buffered transaction.  Preserve the accepted
+* S2B-6 path for a one-character buffer; only multi-character writes use the
+* deferred-present batch.  The H6309 input count is at most 64, so bit 7 of
+* the private count byte is a transient batch marker without new DP storage.
+                    lda       <gr0082+1
+                    cmpa      #1
+                    lbhi      SCG_FC_BATCH_BEGIN
                     ldx       #FstGrfBf
-SCG_FC_NEXT         lda       ,x+
+                    lda       ,x
+                    lbsr      L0F4B.1             preserve accepted S2B6 single-buffered-character path
+                    lbcs      SCG_FC_SINGLE_BAD
+                    clr       <gr0082+1
+                    lbra      L0F78
+SCG_FC_SINGLE_BAD   clr       <gr0082+1
+                    orcc      #Carry
+                    lbra      SysRet
+
+SCG_FC_BATCH_BEGIN  lda       <grSCFlags
+                    bita      #SCG.FlagMirrorDirty
+                    lbne      SCG_FC_DIRTY         never admit a prior failed transaction as a new batch
+
+* Preserve the logical cursor so a pre-present batch failure can roll back to
+* the still-authoritative visible front.
+                    ldd       Wt.CurX,y
+                    pshs      d
+                    ldd       Wt.CurY,y
+                    pshs      d
+                    lda       <gr0082+1
+                    ora       #$80
+                    sta       <gr0082+1
+
+                    ldx       #FstGrfBf
+                    lda       ,x+
                     pshs      x
-                    lbsr      L0F4B.1
+                    lbsr      L0F4B.1             character 0 owns normal setup
                     lbcs      SCG_FC_BAD
                     puls      x
                     dec       <gr0082+1
+SCG_FC_NEXT         lda       ,x+
+                    pshs      x
+                    lbsr      Not8Wd               reuse mapped font/window setup
+                    lbcs      SCG_FC_BAD
+                    puls      x
+                    dec       <gr0082+1
+                    lda       <gr0082+1
+                    cmpa      #$80
                     lbne      SCG_FC_NEXT
+
+SCG_FC_COMMIT       lbsr      SCG_ALPHA_BATCH_COMMIT
+                    lbcs      SCG_FC_COMMIT_BAD
+                    clr       <gr0082+1
+                    leas      4,s                 discard saved CurY/CurX after visible success
                     lbra      L0F78
+
 SCG_FC_BAD          puls      x                   unwind caller-owned buffer pointer
-                    lbra      SysRet               top-level buffered-write error return
+                    clr       <gr0082+1
+SCG_FC_ROLLBACK     puls      d                   restore starting CurY
+                    std       Wt.CurY,y
+                    puls      d                   restore starting CurX
+                    std       Wt.CurX,y
+                    ldq       Wt.CurX,y
+                    stq       <gr0047             keep GrfDrv working cursor coherent
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    lbra      SysRet
+
+SCG_FC_COMMIT_BAD   clr       <gr0082+1
+                    tsta                          A=0 before present, A=1 after visible present
+                    lbeq      SCG_FC_ROLLBACK
+                    leas      4,s                 visible front owns advanced cursor on mirror failure
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    lbra      SysRet
+
+SCG_FC_DIRTY        ldb       #E$NotRdy
+                    orcc      #Carry
+                    lbra      SysRet
 
 SCG_FC_LEGACY       equ       *
                     ENDC
@@ -3601,7 +3664,7 @@ SCG_FC_LEGACY       equ       *
                     lbsr      L0F4B.1             ensure window is set up properly during 1st chr.
 * perhaps the DEC <$83 could be here... remove FAST.SET, and fix f1.do
                     lda       <Gr.STYMk           is it a hardware text screen?
-                    bmi       fast.set            yes, make it _really_ fast
+                    lbmi      fast.set            yes, make it _really_ fast
                     ldb       <gr006E+1           graphics, get X size of font
                     cmpb      #$08                Even byte wide size font?
                     bne       f1.do               no, go setup for multi-color/shiftable screen
