@@ -242,7 +242,7 @@ start               clr       winOpen,u
                     os9       F$Exit
 
 ********************************************************************
-* Inspect both retained command records and copy the 32-byte glyph tile.
+* Inspect the retained alpha command, prove record 1 stayed unused, and copy the 32-byte glyph tile.
 ********************************************************************
 verifyCommands      pshs      x,y,u
                     ldx       #SC.VideoActiveSurface
@@ -271,7 +271,7 @@ verifyCommands      pshs      x,y,u
                     ldy       ,s                  original program-static U
                     stx       cmdMap,y
 
-* Record 0: MASKED_BLIT from command-MBO offset 128 into active front.
+* Record 0: replayed MASKED_BLIT from offset 128 now targets hidden mirror.
                     lda       SC.GfxCmdABIMajorO,x
                     cmpa      #1
                     lbne      vcMappedBad
@@ -305,8 +305,9 @@ verifyCommands      pshs      x,y,u
                     ldd       SC.GfxCmdSourceO+14,x
                     cmpd      #$0800              height 8
                     lbne      vcMappedBad
-                    lda       SC.GfxCmdDestO,x
-                    cmpa      activeSurf,y
+                    lda       activeSurf,y
+                    eora      #1
+                    cmpa      SC.GfxCmdDestO,x
                     lbne      vcMappedBad
                     lda       SC.GfxCmdDestO+1,x
                     cmpa      #SC.GraphicsFmtIndex4
@@ -364,35 +365,11 @@ vcGlyphNext         leas      1,s
                     tst       sawKey,y
                     lbeq      vcMappedBad
 
-* Record 1: full-frame BLIT from new visible front to hidden old front.
+* S2B-6 alpha replay reuses record 0.  Record 1 must remain untouched, proving
+* the old 640x480 per-glyph mirror transaction did not run.
                     ldx       cmdMap,y
                     leax      64,x
-                    lda       SC.GfxCmdABIMajorO,x
-                    cmpa      #1
-                    lbne      vcMappedBad
                     lda       SC.GfxCmdOperationO,x
-                    cmpa      #SC.GraphicsOpBlit
-                    lbne      vcMappedBad
-                    lda       SC.GfxCmdSourceO,x
-                    cmpa      activeSurf,y
-                    lbne      vcMappedBad
-                    lda       activeSurf,y
-                    eora      #1
-                    cmpa      SC.GfxCmdDestO,x
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdSrcXO,x
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdSrcYO,x
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdDstXO,x
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdDstYO,x
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdWidthO,x
-                    cmpd      #$8002
-                    lbne      vcMappedBad
-                    ldd       SC.GfxCmdHeightO,x
-                    cmpd      #$E001
                     lbne      vcMappedBad
 
                     ldu       cmdMap,y            restore verifyCommands map for F$ClrBlk

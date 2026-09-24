@@ -38,8 +38,9 @@ def forbid(path, text):
     if text in data:
         raise SystemExit(f"FAIL: {path}: rejected V1 integration seam still present: {text}")
 
-need('defs/cocovtio.d', 'grSCGlyphRows       EQU       grRsrved+$2E')
-need('defs/cocovtio.d', 'grSCMaskKey         EQU       grRsrved+$36')
+need('defs/cocovtio.d', 'grSCMapSave         EQU       grRsrved+$2D')
+need('defs/cocovtio.d', 'grSCGlyphRows       EQU       grRsrved+$2F')
+need('defs/cocovtio.d', 'grSCMaskKey         EQU       grSCColor')
 need('defs/cocovtio.d', 'grRsrved            RMB       256-.')
 need('level2/cmds/grfdrv.asm', 'ldx       Wt.STbl,y           inspect the target window before consuming char 0')
 need('level2/cmds/grfdrv.asm', 'SCG_FC_NEXT         lda       ,x+')
@@ -54,8 +55,10 @@ forbid('level2/cmds/grfdrv.asm', 'lbcc      L0F4DSCDone')
 need('level2/cmds/scgrf.inc', 'SCG.GlyphOffset     equ       128')
 need('level2/cmds/scgrf.inc', 'SCG_BUILD_MASKED_GLYPH')
 need('level2/cmds/scgrf.inc', 'lda       #SC.GraphicsOpMasked')
-need('level2/cmds/scgrf.inc', 'SCG_BUILD_MIRROR_BLIT_R1')
-need('level2/cmds/scgrf.inc', 'SCG_SUBMIT_RECORD1')
+need('level2/cmds/scgrf.inc', 'SCG_RETARGET_MASKED_BACK')
+need('level2/cmds/scgrf.inc', 'replay same 8x8 MASKED_BLIT into new hidden back')
+forbid('level2/cmds/scgrf.inc', 'lbsr      SCG_BUILD_MIRROR_BLIT_R1')
+forbid('level2/cmds/scgrf.inc', 'lbsr      SCG_SUBMIT_RECORD1  mirror BLIT record 1')
 need('level2/cmds/scgrf.inc', 'ldd       #Grp.Fnt*256+Fnt.S8x8')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', "alphaA              fcb       'A'")
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'alphaBC             fcc       /BC/')
@@ -71,9 +74,11 @@ need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'vcMappedBad         ldu       c
 need('scripts/test-supercoco-s2b5-runtime.sh', 'REQUIRED_XROAR_BASE="23d6f425d805de419f0297a62cbe60b6450e92e2"')
 forbid('scripts/test-supercoco-s2b5-runtime.sh', '3429056f410ea3d9713ccddc96c492f159bd9a8a')
 
-# The two new aliases deliberately consume the final nine bytes of the
-# historical reserved tail and may not grow beyond +$36 without a new review.
+# S2B-6 keeps the two-byte map save disjoint from all eight glyph rows while
+# remaining entirely inside the historical reserved tail through +$36.
 d=Path('defs/cocovtio.d').read_text()
+if 'grSCMapSave         EQU       grRsrved+$2D' not in d or 'grSCGlyphRows       EQU       grRsrved+$2F' not in d:
+    raise SystemExit('FAIL: S2B-6 map-save/glyph-row layout guard missing')
 for off in range(0x37, 0x40):
     token=f'grRsrved+${off:02X}'
     if token in d or token.lower() in d.lower():

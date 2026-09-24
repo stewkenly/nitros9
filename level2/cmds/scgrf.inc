@@ -1068,13 +1068,13 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
 
                     lbsr      SCG_BUILD_MASKED_GLYPH
                     lbcs      SCG_RG_BAD
-                    lbsr      SCG_SUBMIT_FILL     MASKED_BLIT record 0
+                    lbsr      SCG_SUBMIT_FILL     MASKED_BLIT record 0 into hidden back
                     lbcs      SCG_RG_BAD
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_RG_BAD
-                    lbsr      SCG_BUILD_MIRROR_BLIT_R1
+                    lbsr      SCG_RETARGET_MASKED_BACK
                     lbcs      SCG_RG_BAD
-                    lbsr      SCG_SUBMIT_RECORD1  mirror BLIT record 1
+                    lbsr      SCG_SUBMIT_FILL     replay same 8x8 MASKED_BLIT into new hidden back
                     lbcs      SCG_RG_BAD
 
                     lda       <grSCFlags
@@ -1085,6 +1085,38 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
 SCG_RG_BAD          ldb       #E$NotRdy
                     orcc      #Carry
                     rts
+
+********************************************************************
+* Retarget the already-built MASKED_BLIT record 0 to the new hidden back.
+*
+* SCG_PRESENT_BACK swaps grSCBack after the first 8x8 draw becomes visible.
+* Replaying the exact same 8x8 command into that newly hidden old front keeps
+* both framebuffers coherent without the S2B-5 640x480 full-frame mirror.
+********************************************************************
+SCG_RETARGET_MASKED_BACK
+                    pshs      x,u
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       <grSCBack
+                    lbeq      SCG_RMB_GEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_RMB_GENCOPY
+SCG_RMB_GEN0        ldu       #GrfMem+grSCGen0
+SCG_RMB_GENCOPY     lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    lbsr      SCG_T1_RESTORE
+                    clrb
+                    andcc     #^Carry
+                    puls      x,u,pc
 
 ********************************************************************
 * Fixed 8x8 style-9 cursor advance.  Preflight in SCG_ALPHA_ENTRY guarantees
