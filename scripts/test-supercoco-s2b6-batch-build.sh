@@ -61,14 +61,25 @@ src = Path('level2/cmds/scgrf.inc').read_text()
 render_start = src.index('SCG_RENDER_GLYPH')
 render_end = src.index('SCG_ALPHA_ADVANCE', render_start)
 render = src[render_start:render_end]
-for token in (
-    'tst       <gr0082+1',
-    'lbmi      SCG_RG_BATCH',
-    'SCG_PRESENT_BACK',
-    'SCG_RETARGET_MASKED_BACK',
-):
+for token in ('SCG_PRESENT_BACK', 'SCG_RETARGET_MASKED_BACK'):
     if token not in render:
-        raise SystemExit(f'FAIL: single/deferred alpha split missing {token}')
+        raise SystemExit(f'FAIL: retained single-character alpha path missing {token}')
+
+strip_mode = 'SCG_STAGE_STRIP_GLYPH' in src
+if strip_mode:
+    alpha_start = src.index('SCG_ALPHA_ENTRY')
+    alpha_end = src.index('SCG_ALPHA_BAD       ldb', alpha_start)
+    alpha = src[alpha_start:alpha_end]
+    for token in ('tst       <gr0082+1', 'lbmi      SCG_ALPHA_STRIP', 'SCG_STAGE_STRIP_GLYPH'):
+        if token not in alpha:
+            raise SystemExit(f'FAIL: strip descendant lost buffered staging route {token}')
+    for token in ('lbmi      SCG_RG_BATCH', 'SCG_RG_BATCH'):
+        if token in render:
+            raise SystemExit(f'FAIL: strip descendant still submits glyphs through V3 deferred renderer: {token}')
+else:
+    for token in ('tst       <gr0082+1', 'lbmi      SCG_RG_BATCH'):
+        if token not in render:
+            raise SystemExit(f'FAIL: V3 single/deferred alpha split missing {token}')
 
 batch_start = src.index('SCG_ALPHA_BATCH_COMMIT')
 batch_end = src.index('SCG_RENDER_RECT', batch_start)
@@ -84,13 +95,19 @@ for token in (
         raise SystemExit(f'FAIL: batch commit missing {token}')
 if batch.count('SCG_PRESENT_BACK') != 1:
     raise SystemExit('FAIL: buffered batch commit must contain exactly one present call')
+if strip_mode and 'SCG_ALPHA_STRIP_FLUSH' not in batch:
+    raise SystemExit('FAIL: strip descendant does not flush its final row before present')
 
 need('level2/cmds/scgrf.inc', 'negative count here can only belong to the current governed transaction')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED BATCH COMMIT PASS')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'verifyBatchCommands')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'Batched presentation must toggle exactly once relative to single A.')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              x=16 little endian')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$8002              width 640 little endian')
+if strip_mode:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED STRIP COMMIT PASS')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              command width 16 little endian')
+else:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED BATCH COMMIT PASS')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              x=16 little endian')
 
 print('PASS: S2B-6 buffered-alpha batch source guards')
 PY2

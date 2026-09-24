@@ -25,6 +25,10 @@ SCG.CmdPages        equ       1
 SCG.CmdBytes        equ       $2000
 SCG.CmdRecord1      equ       64
 SCG.GlyphOffset     equ       128
+SCG.StripStride     equ       320
+SCG.StripStartX     equ       grSCCurrentBlock    alpha-only alias: +$0F..+$10
+SCG.StripCount      equ       grSCBlocksLeft      alpha-only alias: +$11
+SCG.StripStartY     equ       grSCMBOBase         alpha-only alias: +$12..+$13
 
 ********************************************************************
 * Initialize private state.  Called only on the first GrfDrv init.
@@ -879,7 +883,11 @@ SCG_ALPHA_COPY      lda       ,x+
                     decb
                     lbne      SCG_ALPHA_COPY
 
+                    tst       <gr0082+1
+                    lbmi      SCG_ALPHA_STRIP      buffered write stages into one row strip
                     lbsr      SCG_RENDER_GLYPH
+                    rts
+SCG_ALPHA_STRIP     lbsr      SCG_STAGE_STRIP_GLYPH
                     rts
 SCG_ALPHA_BAD       ldb       #E$NotRdy
                     orcc      #Carry
@@ -1076,8 +1084,6 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
                     lbcs      SCG_RG_BAD
                     lbsr      SCG_SUBMIT_FILL     MASKED_BLIT record 0 into hidden back
                     lbcs      SCG_RG_BAD
-                    tst       <gr0082+1
-                    lbmi      SCG_RG_BATCH         buffered write defers present/mirror to one final commit
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_RG_BAD
                     lbsr      SCG_RETARGET_MASKED_BACK
@@ -1088,7 +1094,7 @@ SCG_RENDER_GLYPH    lda       <grSCFlags
                     lda       <grSCFlags
                     anda      #^SCG.FlagMirrorDirty
                     sta       <grSCFlags
-SCG_RG_BATCH        lbsr      SCG_ALPHA_ADVANCE
+                    lbsr      SCG_ALPHA_ADVANCE
                     rts
 SCG_RG_BAD          ldb       #E$NotRdy
                     orcc      #Carry
@@ -1147,6 +1153,261 @@ SCG_AA_SYNC         ldq       Wt.CurX,y
                     rts
 
 ********************************************************************
+* Stage one fixed 8x8 alpha glyph into a 640x8 INDEX4 source strip inside the
+* command MBO.  No MEDIA job is submitted here.  A row is flushed only when
+* alpha advance wraps to x=0, or later by SCG_ALPHA_BATCH_COMMIT.
+*
+* The scratch aliases reuse allocation/MBO-programming temporaries whose
+* lifetimes do not overlap active alpha rendering, so the fixed GrfDrv direct
+* page remains unchanged.
+********************************************************************
+SCG_STAGE_STRIP_GLYPH
+                    pshs      x,y,u
+                    lda       Wt.Fore,y
+                    anda      #$0F
+                    sta       <grSCFlagMask       foreground nibble
+                    lda       Wt.Back,y
+                    anda      #$0F
+                    sta       <grSCPagesLeft      temporary background nibble
+
+                    lda       Wt.BSW,y
+                    bita      #TChr
+                    lbne      SCG_SSG_OPAQUE
+* Transparent: XOR with $F guarantees a key distinct from foreground.
+                    lda       <grSCFlagMask
+                    eora      #$0F
+                    sta       <grSCMaskKey
+                    sta       <grSCSlot           zero font bits stage the key
+                    lbra      SCG_SSG_KEY_READY
+
+* Opaque: select a key distinct from foreground/background, while zero font
+* bits stage the real background color so MASKED_BLIT behaves as a full copy.
+SCG_SSG_OPAQUE      clra
+SCG_SSG_KEY_LOOP    cmpa      <grSCFlagMask
+                    lbeq      SCG_SSG_KEY_NEXT
+                    cmpa      <grSCPagesLeft
+                    lbne      SCG_SSG_KEY_FOUND
+SCG_SSG_KEY_NEXT    inca
+                    lbra      SCG_SSG_KEY_LOOP
+SCG_SSG_KEY_FOUND   sta       <grSCMaskKey
+                    lda       <grSCPagesLeft
+                    sta       <grSCSlot
+SCG_SSG_KEY_READY
+
+* The first staged glyph owns MirrorDirty and snapshots this row's destination
+* origin.  Later glyphs in the same batch arrive with MirrorDirty already set.
+                    lda       <grSCFlags
+                    bita      #SCG.FlagMirrorDirty
+                    lbne      SCG_SSG_HAVE_ROW
+                    ora       #SCG.FlagMirrorDirty
+                    sta       <grSCFlags
+                    ldd       Wt.CurX,y
+                    std       <SCG.StripStartX
+                    ldd       Wt.CurY,y
+                    std       <SCG.StripStartY
+                    clr       <SCG.StripCount
+SCG_SSG_HAVE_ROW
+
+* Source strip is a fixed 640x8 surface at command-MBO offset 128, stride 320.
+* Wt.CurX is always an 8-pixel multiple; divide by two for its INDEX4 byte
+* offset, then write four bytes per font row and advance by the remaining 316.
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    stx       <grSCMapAddr
+                    leax      SCG.GlyphOffset,x
+                    ldd       Wt.CurX,y
+                    lsra
+                    rorb
+                    leax      d,x
+                    ldu       #GrfMem+grSCGlyphRows
+                    lda       #8
+                    sta       <grSCPagesLeft
+SCG_SSG_ROW         lda       ,u+
+                    sta       <grScrtch
+                    ldb       #4
+SCG_SSG_PAIR        lda       <grSCSlot
+                    lsla
+                    lsla
+                    lsla
+                    lsla
+                    sta       <grScrtch+1
+                    asl       <grScrtch
+                    lbcc      SCG_SSG_HIGH_DONE
+                    lda       <grSCFlagMask
+                    lsla
+                    lsla
+                    lsla
+                    lsla
+                    sta       <grScrtch+1
+SCG_SSG_HIGH_DONE   asl       <grScrtch
+                    lbcc      SCG_SSG_LOW_FILL
+                    lda       <grSCFlagMask
+                    lbra      SCG_SSG_LOW_MERGE
+SCG_SSG_LOW_FILL    lda       <grSCSlot
+SCG_SSG_LOW_MERGE   ora       <grScrtch+1
+                    sta       ,x+
+                    decb
+                    lbne      SCG_SSG_PAIR
+                    leax      316,x
+                    dec       <grSCPagesLeft
+                    lbne      SCG_SSG_ROW
+                    lbsr      SCG_T1_RESTORE
+
+                    inc       <SCG.StripCount
+                    lbsr      SCG_ALPHA_ADVANCE
+                    lbcs      SCG_SSG_BAD
+                    ldd       Wt.CurX,y
+                    lbne      SCG_SSG_GOOD         no physical row wrap yet
+                    lbsr      SCG_ALPHA_STRIP_FLUSH
+                    lbcs      SCG_SSG_BAD
+SCG_SSG_GOOD        clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+SCG_SSG_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    puls      x,y,u,pc
+
+********************************************************************
+* Submit the currently staged row strip as one Graphics V1 MASKED_BLIT.
+* The source surface remains 640x8/stride 320 at offset 128; command src/dst X
+* and width select only the contiguous glyph run staged since StripStartX.
+********************************************************************
+SCG_ALPHA_STRIP_FLUSH
+                    pshs      x,y,u
+                    lda       <SCG.StripCount
+                    lbeq      SCG_ASF_GOOD
+
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    stx       <grSCMapAddr
+                    pshs      y
+                    ldy       #64
+                    clra
+SCG_ASF_ZERO        sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_ASF_ZERO
+                    puls      y
+
+* Command record 0.
+                    ldx       <grSCMapAddr
+                    lda       #1
+                    sta       SC.GfxCmdABIMajorO,x
+                    lda       #SC.GraphicsOpMasked
+                    sta       SC.GfxCmdOperationO,x
+                    lda       <grSCMaskKey
+                    sta       SC.GfxCmdColorO,x
+
+* Source descriptor = command MBO slot 2, offset 128, 640x8 INDEX4, stride 320.
+                    leax      SC.GfxCmdSourceO,x
+                    lda       #SCG.SlotCmd
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCGenCmd
+                    sta       2,x
+                    lda       <grSCGenCmd+1
+                    sta       3,x
+                    lda       <grSCGenCmd+2
+                    sta       4,x
+                    lda       <grSCGenCmd+3
+                    sta       5,x
+                    lda       #$80
+                    sta       6,x
+                    clr       7,x
+                    clr       8,x
+                    clr       9,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #8
+                    sta       14,x
+                    clr       15,x
+
+* Destination descriptor = current hidden 640x480 framebuffer.
+                    ldx       <grSCMapAddr
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       #SC.GraphicsFmtIndex4
+                    sta       1,x
+                    lda       <grSCBack
+                    lbeq      SCG_ASF_DGEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_ASF_DGEN_COPY
+SCG_ASF_DGEN0       ldu       #GrfMem+grSCGen0
+SCG_ASF_DGEN_COPY   lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    clr       6,x
+                    clr       7,x
+                    clr       8,x
+                    clr       9,x
+                    lda       #$40
+                    sta       10,x
+                    lda       #$01
+                    sta       11,x
+                    lda       #$80
+                    sta       12,x
+                    lda       #$02
+                    sta       13,x
+                    lda       #$E0
+                    sta       14,x
+                    lda       #$01
+                    sta       15,x
+
+* One row strip: src/dst X are the run origin, Y is current text row, width is
+* StripCount*8, and height is exactly one glyph row block (8 pixels).
+                    ldx       <grSCMapAddr
+                    ldd       <SCG.StripStartX
+                    stb       SC.GfxCmdSrcXO,x
+                    sta       SC.GfxCmdSrcXO+1,x
+                    stb       SC.GfxCmdDstXO,x
+                    sta       SC.GfxCmdDstXO+1,x
+                    clra
+                    clrb
+                    std       SC.GfxCmdSrcYO,x
+                    ldd       <SCG.StripStartY
+                    stb       SC.GfxCmdDstYO,x
+                    sta       SC.GfxCmdDstYO+1,x
+                    clra
+                    ldb       <SCG.StripCount
+                    lsld
+                    lsld
+                    lsld
+                    stb       SC.GfxCmdWidthO,x
+                    sta       SC.GfxCmdWidthO+1,x
+                    lda       #8
+                    sta       SC.GfxCmdHeightO,x
+                    clr       SC.GfxCmdHeightO+1,x
+
+                    lbsr      SCG_T1_RESTORE
+                    lbsr      SCG_SUBMIT_FILL
+                    lbcs      SCG_ASF_BAD
+
+* Prepare the next physical row/run at the already advanced logical cursor.
+                    ldd       Wt.CurX,y
+                    std       <SCG.StripStartX
+                    ldd       Wt.CurY,y
+                    std       <SCG.StripStartY
+                    clr       <SCG.StripCount
+SCG_ASF_GOOD        clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+SCG_ASF_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    puls      x,y,u,pc
+
+********************************************************************
 * Commit one completed buffered-alpha batch.
 *
 * Every glyph has already completed on the same hidden back surface.  Present
@@ -1155,6 +1416,8 @@ SCG_AA_SYNC         ldq       Wt.CurX,y
 * occurred before (A=0) or after (A=1) the new front became authoritative.
 ********************************************************************
 SCG_ALPHA_BATCH_COMMIT
+                    lbsr      SCG_ALPHA_STRIP_FLUSH
+                    lbcs      SCG_ABC_PRE_BAD
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_ABC_PRE_BAD
                     lbsr      SCG_BUILD_MIRROR_BLIT_R1

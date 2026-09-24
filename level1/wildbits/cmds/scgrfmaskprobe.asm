@@ -80,7 +80,7 @@ msgSingleLen        equ       *-msgSingle
 msgBuffered         fcc       /S2B5 R1K BUFFERED BC PASS/
                     fcb       C$CR
 msgBufferedLen      equ       *-msgBuffered
-msgBatch            fcc       /S2B6 BUFFERED BATCH COMMIT PASS/
+msgBatch            fcc       /S2B6 BUFFERED STRIP COMMIT PASS/
                     fcb       C$CR
 msgBatchLen         equ       *-msgBatch
 msgMirror           fcc       /S2B5 R1K MIRROR PASS/
@@ -599,11 +599,10 @@ vbfMapBad           puls      u
                     lbra      vbfBad
 
 ********************************************************************
-* Buffered-batch command witness after BC.
+* Buffered-strip command witness after BC.
 * activeSurf is the current front, updated by verifyFront immediately before
-* this call.  Record 0 is the last hidden-draw MASKED_BLIT (C at x=16) and now
-* names the visible front.  Record 1 is the one final 640x480 front-to-hidden
-* mirror issued after the single batch present.
+* this call.  Record 0 is one 16x8 MASKED_BLIT spanning B/C from x=8..23 on
+* the visible batch surface.  Record 1 remains the one final 640x480 mirror.
 ********************************************************************
 verifyBatchCommands pshs      x,y,u
                     ldb       #2
@@ -625,13 +624,39 @@ verifyBatchCommands pshs      x,y,u
                     ldy       ,s                  original program-static U
                     stx       cmdMap,y
 
-* Record 0 is the last glyph command and still targets the batch surface that
-* just became visible.  C begins at x=16, y=0 and remains 8x8 INDEX4.
+* Record 0 is one row-strip command on the newly visible batch surface.
+* Source is the fixed 640x8 strip at command-MBO offset 128/stride 320.  The
+* two-character BC run starts at x=8 and has command width 16, height 8.
                     lda       SC.GfxCmdABIMajorO,x
                     cmpa      #1
                     lbne      vbcMappedBad
                     lda       SC.GfxCmdOperationO,x
                     cmpa      #SC.GraphicsOpMasked
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdSourceO,x
+                    cmpa      #2
+                    lbne      vbcMappedBad
+                    lda       SC.GfxCmdSourceO+1,x
+                    cmpa      #SC.GraphicsFmtIndex4
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSourceO+6,x
+                    cmpd      #$8000              source offset 128 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSourceO+8,x
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSourceO+10,x
+                    cmpd      #$4001              source stride 320 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSourceO+12,x
+                    cmpd      #$8002              source width 640 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSourceO+14,x
+                    cmpd      #$0800              source height 8 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSrcXO,x
+                    cmpd      #$0800              source x=8 little endian
+                    lbne      vbcMappedBad
+                    ldd       SC.GfxCmdSrcYO,x
                     lbne      vbcMappedBad
                     lda       SC.GfxCmdDestO,x
                     cmpa      activeSurf,y
@@ -640,12 +665,12 @@ verifyBatchCommands pshs      x,y,u
                     cmpa      #SC.GraphicsFmtIndex4
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdDstXO,x
-                    cmpd      #$1000              x=16 little endian
+                    cmpd      #$0800              destination x=8 little endian
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdDstYO,x
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdWidthO,x
-                    cmpd      #$0800
+                    cmpd      #$1000              command width 16 little endian
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdHeightO,x
                     cmpd      #$0800
