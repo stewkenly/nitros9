@@ -24,6 +24,21 @@ XROAR="${XROAR:-$XROAR_ROOT/src/xroar}"
 ROMDIR="${ROMDIR:-$SUPERCOCO_EMULATOR_ROOT/roms}"
 BASE_VHD="${BASE_VHD:-$SUPERCOCO_EMULATOR_ROOT/images/63SDC.VHD}"
 
+sha256_file() {
+    python3 - "$1" <<'PY2'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+h = sha256()
+with p.open('rb') as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b''):
+        h.update(chunk)
+print(h.hexdigest())
+PY2
+}
+
 for cmd in git make lwasm os9 python3; do
     command -v "$cmd" >/dev/null 2>&1 || { echo "FAIL: $cmd not found" >&2; exit 1; }
 done
@@ -42,7 +57,15 @@ fi
 git diff --check
 
 RECIPE="$ROOT/recipes/coco3_6309/40d"
-make -C "$RECIPE" --no-print-directory .mods/cowin.io .mods/grfdrv
+make -B -C "$RECIPE" --no-print-directory .mods/cowin.io .mods/grfdrv
+
+printf 'Runtime XRoar root: %s\n' "$XROAR_ROOT"
+printf 'Runtime XRoar HEAD: %s\n' "$(git -C "$XROAR_ROOT" rev-parse HEAD)"
+printf 'Runtime XRoar SHA256: %s\n' "$(sha256_file "$XROAR")"
+printf 'Runtime base VHD: %s\n' "$BASE_VHD"
+printf 'Runtime base VHD SHA256: %s\n' "$(sha256_file "$BASE_VHD")"
+printf 'Runtime CoWin SHA256: %s\n' "$(sha256_file "$RECIPE/.mods/cowin.io")"
+printf 'Runtime GrfDrv SHA256: %s\n' "$(sha256_file "$RECIPE/.mods/grfdrv")"
 
 WORK="$(mktemp -d /tmp/supercoco-s2b5-runtime.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -96,7 +119,7 @@ set +e
   -cart-type cocosdc -no-cart-autorun -machine-cart supercocosdc \
   -load-hd0 "$VHD" -no-disk-write-back \
   -console-capture "$CONSOLE" -screen-capture "$SCREEN" \
-  -trap pc=0x006b -trap-range 1 -trap-state "$CRASH" -trap-timeout 0.5 \
+  -trap pc=0x006b -trap-range 1-1 -trap-state "$CRASH" -trap-timeout 0.5 \
   -type $'DOS\r' -timeout "${S2B5_TIMEOUT:-150}" >"$LOG" 2>&1
 RC=$?
 set -e

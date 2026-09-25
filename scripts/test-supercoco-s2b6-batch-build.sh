@@ -113,7 +113,7 @@ print('PASS: S2B-6 buffered-alpha batch source guards')
 PY2
 
 RECIPE="$ROOT/recipes/coco3_6309/40d"
-make -C "$RECIPE" --no-print-directory .mods/grfdrv
+make -B -C "$RECIPE" --no-print-directory .mods/grfdrv
 
 test -s "$RECIPE/.mods/grfdrv"
 os9 ident "$RECIPE/.mods/grfdrv" | grep -Fqi 'grfdrv' || {

@@ -94,7 +94,7 @@ print('PASS: S2B-5 source guards')
 PY
 
 RECIPE="$ROOT/recipes/coco3_6309/40d"
-make -C "$RECIPE" --no-print-directory .mods/cowin.io .mods/grfdrv
+make -B -C "$RECIPE" --no-print-directory .mods/cowin.io .mods/grfdrv
 
 test -s "$RECIPE/.mods/cowin.io"
 test -s "$RECIPE/.mods/grfdrv"
