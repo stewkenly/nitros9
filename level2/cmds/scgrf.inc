@@ -29,6 +29,8 @@ SCG.StripStride     equ       320
 SCG.StripStartX     equ       grSCCurrentBlock    alpha-only alias: +$0F..+$10
 SCG.StripCount      equ       grSCBlocksLeft      alpha-only alias: +$11
 SCG.StripStartY     equ       grSCMBOBase         alpha-only alias: +$12..+$13
+SCG.StripRecords    equ       grSCMBOStart        alpha-only alias: +$14
+SCG.StripReplay     equ       grSCMBOStart+1      alpha-only alias: +$15
 
 ********************************************************************
 * Initialize private state.  Called only on the first GrfDrv init.
@@ -174,6 +176,11 @@ SCG_PROBE_VIDEO     ldx       #SC.VideoABIMajor
                     lbcs      SCG_PV_BAD
                     cmpa      #1
                     lbne      SCG_PV_BAD
+                    ldx       #SC.VideoCaps0
+                    lbsr      SC_READ8
+                    lbcs      SCG_PV_BAD
+                    bita      #$01                640x480 INDEX4; full-speed gated by emulator
+                    lbeq      SCG_PV_BAD
                     ldx       #SC.VideoFormat
                     lbsr      SC_READ8
                     lbcs      SCG_PV_BAD
@@ -1206,6 +1213,8 @@ SCG_SSG_KEY_READY
                     ldd       Wt.CurY,y
                     std       <SCG.StripStartY
                     clr       <SCG.StripCount
+                    clr       <SCG.StripRecords
+                    clr       <SCG.StripReplay
 SCG_SSG_HAVE_ROW
 
 * Source strip is a fixed 640x8 surface at command-MBO offset 128, stride 320.
@@ -1279,6 +1288,13 @@ SCG_ALPHA_STRIP_FLUSH
 
                     ldb       <grSCCmdStart+1
                     lbsr      SCG_T1_MAP_BLOCK
+                    lda       <SCG.StripRecords
+                    cmpa      #2
+                    lbhs      SCG_ASF_MAP_BAD
+                    tsta
+                    lbeq      SCG_ASF_RECORD_READY
+                    leax      SCG.CmdRecord1,x
+SCG_ASF_RECORD_READY
                     stx       <grSCMapAddr
                     pshs      y
                     ldy       #64
@@ -1288,7 +1304,7 @@ SCG_ASF_ZERO        sta       ,x+
                     lbne      SCG_ASF_ZERO
                     puls      y
 
-* Command record 0.
+* Retained record 0/1 begins life as the actual hidden-surface MASKED_BLIT.
                     ldx       <grSCMapAddr
                     lda       #1
                     sta       SC.GfxCmdABIMajorO,x
@@ -1391,8 +1407,11 @@ SCG_ASF_DGEN_COPY   lda       ,u+
                     clr       SC.GfxCmdHeightO+1,x
 
                     lbsr      SCG_T1_RESTORE
-                    lbsr      SCG_SUBMIT_FILL
+                    lda       <SCG.StripRecords
+                    sta       <grSCSlot
+                    lbsr      SCG_SUBMIT_RECORD
                     lbcs      SCG_ASF_BAD
+                    inc       <SCG.StripRecords
 
 * Prepare the next physical row/run at the already advanced logical cursor.
                     ldd       Wt.CurX,y
@@ -1403,7 +1422,82 @@ SCG_ASF_DGEN_COPY   lda       ,u+
 SCG_ASF_GOOD        clrb
                     andcc     #^Carry
                     puls      x,y,u,pc
+SCG_ASF_MAP_BAD     lbsr      SCG_T1_RESTORE
 SCG_ASF_BAD         ldb       #E$NotRdy
+                    orcc      #Carry
+                    puls      x,y,u,pc
+
+********************************************************************
+* After PRESENT, grSCBack names the newly hidden old front.  Convert each
+* retained row command in place from temporary-strip MASKED_BLIT to a bounded
+* framebuffer BLIT from the newly visible authoritative front into that hidden
+* mirror.  Geometry is retained; source X/Y becomes destination X/Y.
+********************************************************************
+SCG_ALPHA_DIRTY_MIRROR
+                    pshs      x,y,u
+                    clr       <SCG.StripReplay
+SCG_ADM_NEXT        lda       <SCG.StripReplay
+                    cmpa      <SCG.StripRecords
+                    lbhs      SCG_ADM_GOOD
+
+                    ldb       <grSCCmdStart+1
+                    lbsr      SCG_T1_MAP_BLOCK
+                    lda       <SCG.StripReplay
+                    lbeq      SCG_ADM_RECORD_READY
+                    leax      SCG.CmdRecord1,x
+SCG_ADM_RECORD_READY
+                    stx       <grSCMapAddr
+                    lda       #SC.GraphicsOpBlit
+                    sta       SC.GfxCmdOperationO,x
+                    clr       SC.GfxCmdColorO,x
+
+* The old destination descriptor is exactly the newly visible front after the
+* flip.  Copy all 16 descriptor bytes to source before retargeting destination.
+                    leau      SC.GfxCmdDestO,x
+                    leax      SC.GfxCmdSourceO,x
+                    ldy       #16
+SCG_ADM_DESC_COPY   lda       ,u+
+                    sta       ,x+
+                    leay      -1,y
+                    lbne      SCG_ADM_DESC_COPY
+
+* BLIT the same dirty rectangle, not the temporary strip's y=0 coordinates.
+                    ldx       <grSCMapAddr
+                    ldd       SC.GfxCmdDstXO,x
+                    std       SC.GfxCmdSrcXO,x
+                    ldd       SC.GfxCmdDstYO,x
+                    std       SC.GfxCmdSrcYO,x
+
+* Retarget destination to the newly hidden old front named by grSCBack.
+                    leax      SC.GfxCmdDestO,x
+                    lda       <grSCBack
+                    sta       ,x
+                    lda       <grSCBack
+                    lbeq      SCG_ADM_DGEN0
+                    ldu       #GrfMem+grSCGen1
+                    lbra      SCG_ADM_DGEN_COPY
+SCG_ADM_DGEN0       ldu       #GrfMem+grSCGen0
+SCG_ADM_DGEN_COPY   lda       ,u+
+                    sta       2,x
+                    lda       ,u+
+                    sta       3,x
+                    lda       ,u+
+                    sta       4,x
+                    lda       ,u
+                    sta       5,x
+                    lbsr      SCG_T1_RESTORE
+
+                    lda       <SCG.StripReplay
+                    sta       <grSCSlot
+                    lbsr      SCG_SUBMIT_RECORD
+                    lbcs      SCG_ADM_BAD
+                    inc       <SCG.StripReplay
+                    lbra      SCG_ADM_NEXT
+
+SCG_ADM_GOOD        clrb
+                    andcc     #^Carry
+                    puls      x,y,u,pc
+SCG_ADM_BAD         ldb       #E$NotRdy
                     orcc      #Carry
                     puls      x,y,u,pc
 
@@ -1420,9 +1514,7 @@ SCG_ALPHA_BATCH_COMMIT
                     lbcs      SCG_ABC_PRE_BAD
                     lbsr      SCG_PRESENT_BACK
                     lbcs      SCG_ABC_PRE_BAD
-                    lbsr      SCG_BUILD_MIRROR_BLIT_R1
-                    lbcs      SCG_ABC_POST_BAD
-                    lbsr      SCG_SUBMIT_RECORD1
+                    lbsr      SCG_ALPHA_DIRTY_MIRROR
                     lbcs      SCG_ABC_POST_BAD
                     lda       <grSCFlags
                     anda      #^SCG.FlagMirrorDirty
@@ -1872,7 +1964,8 @@ SCG_EN_BAD          ldb       #E$NotRdy
                     orcc      #Carry
                     rts
 
-SCG_DISABLE         lda       <grSCFlags
+SCG_DISABLE         pshs      y                   preserve caller window/context pointer
+                    lda       <grSCFlags
                     bita      #SCG.FlagVideo
                     lbeq      SCG_DIS_DONE
                     lda       #SC.IRQVideo
@@ -1885,22 +1978,31 @@ SCG_DISABLE         lda       <grSCFlags
                     lda       #SC.VideoCtlCommit
                     lbsr      SC_WRITE8
                     lbcs      SCG_DIS_BAD
+
+* VIDEO is periodic.  A VBLANK can arrive after the W1C above but before the
+* disable commit, so the first observed event may still describe the old
+* active surface.  Fence on authoritative inactive state exactly like PRESENT.
+                    ldy       #4
+SCG_DIS_WAIT_INACTIVE
                     lbsr      SCG_WAIT_VIDEO
                     lbcs      SCG_DIS_BAD
                     ldx       #SC.VideoActiveSurface
                     lbsr      SC_READ8
                     lbcs      SCG_DIS_BAD
                     cmpa      #$FF
-                    lbne      SCG_DIS_BAD
-                    lda       <grSCFlags
+                    lbeq      SCG_DIS_INACTIVE
+                    leay      -1,y
+                    lbne      SCG_DIS_WAIT_INACTIVE
+                    lbra      SCG_DIS_BAD
+SCG_DIS_INACTIVE    lda       <grSCFlags
                     anda      #^SCG.FlagVideo
                     sta       <grSCFlags
 SCG_DIS_DONE        clrb
                     andcc     #^Carry
-                    rts
+                    puls      y,pc
 SCG_DIS_BAD         ldb       #E$NotRdy
                     orcc      #Carry
-                    rts
+                    puls      y,pc
 
 ********************************************************************
 * Select hooks used by GrfDrv.  A SuperCoCo screen never enters the legacy

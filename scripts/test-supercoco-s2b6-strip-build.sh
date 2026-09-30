@@ -62,15 +62,19 @@ if 'SCG_SUBMIT_FILL' in stage:
 flush_start = src.index('SCG_ALPHA_STRIP_FLUSH\n                    pshs')
 flush_end = src.index('SCG_ALPHA_BATCH_COMMIT', flush_start)
 flush = src[flush_start:flush_end]
-for token in (
-    'SC.GraphicsOpMasked',
-    'SCG_SUBMIT_FILL',
-    'SCG.StripCount',
-):
+dirty_mode = 'SCG_ALPHA_DIRTY_MIRROR' in src
+for token in ('SC.GraphicsOpMasked', 'SCG.StripCount'):
     if token not in flush:
         raise SystemExit(f'FAIL: strip flush missing {token}')
-if flush.count('SCG_SUBMIT_FILL') != 1:
-    raise SystemExit('FAIL: one strip flush must submit exactly one MEDIA graphics job')
+if dirty_mode:
+    for token in ('SCG.StripRecords', 'SCG_SUBMIT_RECORD'):
+        if token not in flush:
+            raise SystemExit(f'FAIL: dirty strip flush missing {token}')
+    if 'SCG_SUBMIT_FILL' in flush:
+        raise SystemExit('FAIL: dirty strip flush fell back to record-0-only submit')
+else:
+    if 'SCG_SUBMIT_FILL' not in flush or flush.count('SCG_SUBMIT_FILL') != 1:
+        raise SystemExit('FAIL: one strip flush must submit exactly one MEDIA graphics job')
 for token in (
     'lda       #$40',
     'lda       #$01',
@@ -84,9 +88,20 @@ for token in (
 batch_start = src.index('SCG_ALPHA_BATCH_COMMIT')
 batch_end = src.index('SCG_RENDER_RECT', batch_start)
 batch = src[batch_start:batch_end]
-for token in ('SCG_ALPHA_STRIP_FLUSH', 'SCG_PRESENT_BACK', 'SCG_BUILD_MIRROR_BLIT_R1', 'SCG_SUBMIT_RECORD1'):
+dirty_mode = 'SCG_ALPHA_DIRTY_MIRROR' in batch
+for token in ('SCG_ALPHA_STRIP_FLUSH', 'SCG_PRESENT_BACK'):
     if token not in batch:
         raise SystemExit(f'FAIL: final strip commit missing {token}')
+if dirty_mode:
+    if 'SCG_ALPHA_DIRTY_MIRROR' not in batch:
+        raise SystemExit('FAIL: dirty strip descendant lost bounded mirror call')
+    for token in ('SCG_BUILD_MIRROR_BLIT_R1', 'SCG_SUBMIT_RECORD1'):
+        if token in batch:
+            raise SystemExit(f'FAIL: dirty strip descendant restored full-frame mirror via {token}')
+else:
+    for token in ('SCG_BUILD_MIRROR_BLIT_R1', 'SCG_SUBMIT_RECORD1'):
+        if token not in batch:
+            raise SystemExit(f'FAIL: final strip commit missing {token}')
 if batch.index('SCG_ALPHA_STRIP_FLUSH') > batch.index('SCG_PRESENT_BACK'):
     raise SystemExit('FAIL: final strip must flush before the one visible present')
 if batch.count('SCG_PRESENT_BACK') != 1:
@@ -99,10 +114,16 @@ if end > 4096:
     raise SystemExit(f'FAIL: strip source exceeds 4K command MBO: end={end}')
 
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED STRIP COMMIT PASS')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source stride 320 little endian')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source width 640 little endian')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source x=8 little endian')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'command width 16 little endian')
+if dirty_mode:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 DIRTY RECT MIRROR PASS')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 TWO-ROW DIRTY RECT PASS')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$6800              width 104 little endian')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1800              width 24 little endian')
+else:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source stride 320 little endian')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source width 640 little endian')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'source x=8 little endian')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'command width 16 little endian')
 
 print('PASS: S2B-6 buffered-alpha row-strip source guards')
 PY2

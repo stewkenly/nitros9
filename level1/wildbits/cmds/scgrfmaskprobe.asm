@@ -29,6 +29,7 @@ cellOffset          rmb       1
 cellCount           rmb       1
 cmdMap              rmb       2
 glyphCopy           rmb       32
+mirrorCopy          rmb       128
 stackSpace          rmb       224
 size                equ       .
 
@@ -64,6 +65,11 @@ alphaA              fcb       'A'
 alphaALen           equ       *-alphaA
 alphaBC             fcc       /BC/
 alphaBCLen          equ       *-alphaBC
+* CurXY control $02 takes text coordinates biased by $20. Column 67 is x=536.
+curWrap             fcb       $02,$63,$20
+curWrapLen          equ       *-curWrap
+alphaWrap16         fcc       /EEEEEEEEEEEEEFFF/
+alphaWrap16Len      equ       *-alphaWrap16
 
 dwend               fcb       $1B,$24
 dwendLen            equ       *-dwend
@@ -83,9 +89,18 @@ msgBufferedLen      equ       *-msgBuffered
 msgBatch            fcc       /S2B6 BUFFERED STRIP COMMIT PASS/
                     fcb       C$CR
 msgBatchLen         equ       *-msgBatch
+msgDirty            fcc       /S2B6 DIRTY RECT MIRROR PASS/
+                    fcb       C$CR
+msgDirtyLen         equ       *-msgDirty
+msgWrap             fcc       /S2B6 TWO-ROW DIRTY RECT PASS/
+                    fcb       C$CR
+msgWrapLen          equ       *-msgWrap
 msgMirror           fcc       /S2B5 R1K MIRROR PASS/
                     fcb       C$CR
 msgMirrorLen        equ       *-msgMirror
+msgReopen           fcc       /S2B6 STYLE9 REOPEN PASS/
+                    fcb       C$CR
+msgReopenLen        equ       *-msgReopen
 msgPass             fcc       /SuperCoCo S2B-5 R1K masked alpha PASS/
                     fcb       C$CR
 msgPassLen          equ       *-msgPass
@@ -210,6 +225,34 @@ start               clr       winOpen,u
                     ldy       #msgBatchLen
                     lda       #1
                     os9       I$WritLn
+                    leax      msgDirty,pcr
+                    ldy       #msgDirtyLen
+                    lda       #1
+                    os9       I$WritLn
+
+* Force a two-row <=64-character transaction: 13 glyphs at x=536..639 and
+* three glyphs at x=0..23 on row 1.  The batch must still present only once.
+                    leax      curWrap,pcr
+                    ldy       #curWrapLen
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      alphaWrap16,pcr
+                    ldy       #alphaWrap16Len
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    lbsr      verifyFront
+                    lbcs      failCleanup
+                    lbsr      verifyWrapCommands
+                    lbcs      failCleanup
+                    lbsr      verifyWrapMirror
+                    lbcs      failCleanup
+                    leax      msgWrap,pcr
+                    ldy       #msgWrapLen
+                    lda       #1
+                    os9       I$WritLn
+
                     leax      msgMirror,pcr
                     ldy       #msgMirrorLen
                     lda       #1
@@ -245,7 +288,86 @@ start               clr       winOpen,u
 
                     lda       winPath,u
                     os9       I$Close
+                    lbcs      failClose
                     clr       winOpen,u
+
+* Reopen after the last window has fully closed.  This is the lifetime proof:
+* GrfDrv must remain a valid shared service, DWSet must re-create style-9
+* per-window resources, and a buffered two-character write must still execute.
+                    leax      pathW15,pcr
+                    lda       #3
+                    os9       I$Open
+                    lbcs      fail
+                    sta       winPath,u
+                    inc       winOpen,u
+
+                    leax      dwset9,pcr
+                    ldy       #dwset9Len
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      bcolor2,pcr
+                    ldy       #bcolor2Len
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      clsCode,pcr
+                    ldy       #clsCodeLen
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      fcolor7,pcr
+                    ldy       #fcolor7Len
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      tcharOn,pcr
+                    ldy       #tcharOnLen
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+                    leax      alphaBC,pcr
+                    ldy       #alphaBCLen
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failCleanup
+
+                    leax      dwend,pcr
+                    ldy       #dwendLen
+                    lda       winPath,u
+                    os9       I$Write
+                    lbcs      failClose
+
+* The reopened style-9 window must tear its per-window resources down cleanly.
+                    ldx       #SC.VideoActiveSurface
+                    lbsr      SC_READ8
+                    lbcs      failClose
+                    cmpa      #$FF
+                    lbne      failClose
+                    ldb       #0
+                    lbsr      SC_MBO_STATUS
+                    lbcs      failClose
+                    bita      #SC.MBOStatusValid!SC.MBOStatusBusy
+                    lbne      failClose
+                    ldb       #1
+                    lbsr      SC_MBO_STATUS
+                    lbcs      failClose
+                    bita      #SC.MBOStatusValid!SC.MBOStatusBusy
+                    lbne      failClose
+                    ldb       #2
+                    lbsr      SC_MBO_STATUS
+                    lbcs      failClose
+                    bita      #SC.MBOStatusValid!SC.MBOStatusBusy
+                    lbne      failClose
+
+                    lda       winPath,u
+                    os9       I$Close
+                    lbcs      failClose
+                    clr       winOpen,u
+                    leax      msgReopen,pcr
+                    ldy       #msgReopenLen
+                    lda       #1
+                    os9       I$WritLn
                     leax      msgPass,pcr
                     ldy       #msgPassLen
                     lda       #1
@@ -621,64 +743,11 @@ verifyBatchCommands pshs      x,y,u
                     os9       F$MapBlk
                     lbcs      vbcMapBad
                     tfr       u,x
-                    ldy       ,s                  original program-static U
+                    ldy       ,s
                     stx       cmdMap,y
 
-* Record 0 is one row-strip command on the newly visible batch surface.
-* Source is the fixed 640x8 strip at command-MBO offset 128/stride 320.  The
-* two-character BC run starts at x=8 and has command width 16, height 8.
-                    lda       SC.GfxCmdABIMajorO,x
-                    cmpa      #1
-                    lbne      vbcMappedBad
-                    lda       SC.GfxCmdOperationO,x
-                    cmpa      #SC.GraphicsOpMasked
-                    lbne      vbcMappedBad
-                    lda       SC.GfxCmdSourceO,x
-                    cmpa      #2
-                    lbne      vbcMappedBad
-                    lda       SC.GfxCmdSourceO+1,x
-                    cmpa      #SC.GraphicsFmtIndex4
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSourceO+6,x
-                    cmpd      #$8000              source offset 128 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSourceO+8,x
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSourceO+10,x
-                    cmpd      #$4001              source stride 320 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSourceO+12,x
-                    cmpd      #$8002              source width 640 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSourceO+14,x
-                    cmpd      #$0800              source height 8 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSrcXO,x
-                    cmpd      #$0800              source x=8 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdSrcYO,x
-                    lbne      vbcMappedBad
-                    lda       SC.GfxCmdDestO,x
-                    cmpa      activeSurf,y
-                    lbne      vbcMappedBad
-                    lda       SC.GfxCmdDestO+1,x
-                    cmpa      #SC.GraphicsFmtIndex4
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdDstXO,x
-                    cmpd      #$0800              destination x=8 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdDstYO,x
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdWidthO,x
-                    cmpd      #$1000              command width 16 little endian
-                    lbne      vbcMappedBad
-                    ldd       SC.GfxCmdHeightO,x
-                    cmpd      #$0800
-                    lbne      vbcMappedBad
-
-* Record 1 is exactly one final full-frame mirror from current front to hidden.
-                    ldx       cmdMap,y
-                    leax      64,x
+* After present, record 0 has become the bounded front->hidden mirror BLIT for
+* the BC rectangle: x=8, y=0, width=16, height=8.
                     lda       SC.GfxCmdABIMajorO,x
                     cmpa      #1
                     lbne      vbcMappedBad
@@ -693,18 +762,26 @@ verifyBatchCommands pshs      x,y,u
                     cmpa      SC.GfxCmdDestO,x
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdSrcXO,x
+                    cmpd      #$0800
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdSrcYO,x
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdDstXO,x
+                    cmpd      #$0800
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdDstYO,x
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdWidthO,x
-                    cmpd      #$8002              width 640 little endian
+                    cmpd      #$1000              width 16 little endian
                     lbne      vbcMappedBad
                     ldd       SC.GfxCmdHeightO,x
-                    cmpd      #$E001              height 480 little endian
+                    cmpd      #$0800
+                    lbne      vbcMappedBad
+
+* One-row BC needs no second retained record.
+                    ldx       cmdMap,y
+                    leax      64,x
+                    lda       SC.GfxCmdOperationO,x
                     lbne      vbcMappedBad
 
                     ldu       cmdMap,y
@@ -726,6 +803,271 @@ vbcBad              puls      x,y,u
                     rts
 vbcMapBad           puls      u
                     lbra      vbcBad
+
+********************************************************************
+* Two-row dirty-mirror command witness.  Record 0 mirrors row 0 x=536..639;
+* record 1 mirrors row 1 x=0..23.  Both copy from current visible front to the
+* newly hidden old front, with source and destination coordinates identical.
+********************************************************************
+verifyWrapCommands  pshs      x,y,u
+                    ldb       #2
+                    lbsr      SC_MBO_BASE
+                    lbcs      vwcBad
+                    leax      SC.MBOPageListO,x
+                    lbsr      SC_READ16LE
+                    lbcs      vwcBad
+                    bitb      #$01
+                    lbne      vwcBad
+                    lsra
+                    rorb
+                    tfr       d,x
+                    pshs      u
+                    ldb       #1
+                    os9       F$MapBlk
+                    lbcs      vwcMapBad
+                    tfr       u,x
+                    ldy       ,s
+                    stx       cmdMap,y
+
+* Record 0: x=536, y=0, width=104, height=8.
+                    lda       SC.GfxCmdOperationO,x
+                    cmpa      #SC.GraphicsOpBlit
+                    lbne      vwcMappedBad
+                    lda       SC.GfxCmdSourceO,x
+                    cmpa      activeSurf,y
+                    lbne      vwcMappedBad
+                    lda       activeSurf,y
+                    eora      #1
+                    cmpa      SC.GfxCmdDestO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdSrcXO,x
+                    cmpd      #$1802              x=536 little endian
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdDstXO,x
+                    cmpd      #$1802
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdSrcYO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdDstYO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdWidthO,x
+                    cmpd      #$6800              width 104 little endian
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdHeightO,x
+                    cmpd      #$0800
+                    lbne      vwcMappedBad
+
+* Record 1: x=0, y=8, width=24, height=8.
+                    ldx       cmdMap,y
+                    leax      64,x
+                    lda       SC.GfxCmdOperationO,x
+                    cmpa      #SC.GraphicsOpBlit
+                    lbne      vwcMappedBad
+                    lda       SC.GfxCmdSourceO,x
+                    cmpa      activeSurf,y
+                    lbne      vwcMappedBad
+                    lda       activeSurf,y
+                    eora      #1
+                    cmpa      SC.GfxCmdDestO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdSrcXO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdDstXO,x
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdSrcYO,x
+                    cmpd      #$0800
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdDstYO,x
+                    cmpd      #$0800
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdWidthO,x
+                    cmpd      #$1800              width 24 little endian
+                    lbne      vwcMappedBad
+                    ldd       SC.GfxCmdHeightO,x
+                    cmpd      #$0800
+                    lbne      vwcMappedBad
+
+                    ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+                    lbcs      vwcInnerBad
+                    puls      u
+                    puls      x,y,u
+                    clrb
+                    andcc     #^Carry
+                    rts
+vwcMappedBad        ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+vwcInnerBad         puls      u
+vwcBad              puls      x,y,u
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+vwcMapBad           puls      u
+                    lbra      vwcBad
+
+********************************************************************
+* Pixel witness for the wrapping transaction.  Copy representative scanlines
+* from both dirty rectangles on the visible front, require non-background data,
+* then compare those 128 bytes exactly against the hidden mirror.  Command
+* geometry above covers the full 8-pixel heights; samples span both rectangles.
+********************************************************************
+verifyWrapMirror    pshs      x,y,u
+                    lda       activeSurf,u
+                    tfr       a,b
+                    lbsr      SC_MBO_BASE
+                    lbcs      vwmBad
+                    leax      SC.MBOPageListO,x
+                    lbsr      SC_READ16LE
+                    lbcs      vwmBad
+                    bitb      #$01
+                    lbne      vwmBad
+                    lsra
+                    rorb
+                    tfr       d,x
+                    pshs      u
+                    ldb       #1
+                    os9       F$MapBlk
+                    lbcs      vwmFrontMapBad
+                    tfr       u,x
+                    ldy       ,s
+                    stx       cmdMap,y
+                    leau      mirrorCopy,y
+                    clr       sawFore,y
+
+                    ldx       cmdMap,y
+                    leax      $010C,x             row 0 y=0, x=536, 52 bytes
+                    ldb       #52
+vwmF0              lda       ,x+
+                    sta       ,u+
+                    cmpa      #$22
+                    lbeq      vwmF0Next
+                    inc       sawFore,y
+vwmF0Next           decb
+                    lbne      vwmF0
+                    ldx       cmdMap,y
+                    leax      $024C,x             row 0 y=1, x=536
+                    ldb       #52
+vwmF1              lda       ,x+
+                    sta       ,u+
+                    cmpa      #$22
+                    lbeq      vwmF1Next
+                    inc       sawFore,y
+vwmF1Next           decb
+                    lbne      vwmF1
+                    ldx       cmdMap,y
+                    leax      $0A00,x             row 1 y=8, x=0, 12 bytes
+                    ldb       #12
+vwmF8              lda       ,x+
+                    sta       ,u+
+                    cmpa      #$22
+                    lbeq      vwmF8Next
+                    inc       sawFore,y
+vwmF8Next           decb
+                    lbne      vwmF8
+                    ldx       cmdMap,y
+                    leax      $0B40,x             row 1 y=9, x=0
+                    ldb       #12
+vwmF9              lda       ,x+
+                    sta       ,u+
+                    cmpa      #$22
+                    lbeq      vwmF9Next
+                    inc       sawFore,y
+vwmF9Next           decb
+                    lbne      vwmF9
+                    tst       sawFore,y
+                    lbeq      vwmFrontMappedBad
+
+                    ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+                    lbcs      vwmFrontInnerBad
+                    puls      u
+
+* Map the opposite framebuffer and compare the same sampled bytes exactly.
+                    lda       activeSurf,u
+                    eora      #1
+                    tfr       a,b
+                    lbsr      SC_MBO_BASE
+                    lbcs      vwmBad
+                    leax      SC.MBOPageListO,x
+                    lbsr      SC_READ16LE
+                    lbcs      vwmBad
+                    bitb      #$01
+                    lbne      vwmBad
+                    lsra
+                    rorb
+                    tfr       d,x
+                    pshs      u
+                    ldb       #1
+                    os9       F$MapBlk
+                    lbcs      vwmMirrorMapBad
+                    tfr       u,x
+                    ldy       ,s
+                    stx       cmdMap,y
+                    leau      mirrorCopy,y
+
+                    ldx       cmdMap,y
+                    leax      $010C,x
+                    ldb       #52
+vwmM0              lda       ,x+
+                    cmpa      ,u+
+                    lbne      vwmMirrorMappedBad
+                    decb
+                    lbne      vwmM0
+                    ldx       cmdMap,y
+                    leax      $024C,x
+                    ldb       #52
+vwmM1              lda       ,x+
+                    cmpa      ,u+
+                    lbne      vwmMirrorMappedBad
+                    decb
+                    lbne      vwmM1
+                    ldx       cmdMap,y
+                    leax      $0A00,x
+                    ldb       #12
+vwmM8              lda       ,x+
+                    cmpa      ,u+
+                    lbne      vwmMirrorMappedBad
+                    decb
+                    lbne      vwmM8
+                    ldx       cmdMap,y
+                    leax      $0B40,x
+                    ldb       #12
+vwmM9              lda       ,x+
+                    cmpa      ,u+
+                    lbne      vwmMirrorMappedBad
+                    decb
+                    lbne      vwmM9
+
+                    ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+                    lbcs      vwmMirrorInnerBad
+                    puls      u
+                    puls      x,y,u
+                    clrb
+                    andcc     #^Carry
+                    rts
+
+vwmFrontMappedBad   ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+vwmFrontInnerBad    puls      u
+                    lbra      vwmBad
+vwmFrontMapBad      puls      u
+                    lbra      vwmBad
+vwmMirrorMappedBad  ldu       cmdMap,y
+                    ldb       #1
+                    os9       F$ClrBlk
+vwmMirrorInnerBad   puls      u
+                    lbra      vwmBad
+vwmMirrorMapBad     puls      u
+vwmBad              puls      x,y,u
+                    ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
 
 ********************************************************************
 * Completion/ownership state after the alpha transaction.

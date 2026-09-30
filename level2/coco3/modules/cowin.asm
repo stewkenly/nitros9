@@ -567,26 +567,10 @@ L02B9               equ       *
                     abx                           Point to next window table
                     deca                          Decrement counter
                     bne       L02B9               Do until all 32 entries are checked
-* All windows are unallocated, terminate GRFDRV
-                    tfr       x,y                 Move to proper register again
-                    ldb       #$02                get grfdrv terminate code
-                    lbsr      L0101               go do it
-                    ldd       >WGlobal+G.GrfEnt   get grfdrv address
-                    clrb                          Make it even page
-                    tfr       d,u                 Move to proper reg for Unlink
-                    os9       F$UnLink            Unlink GRFDRV
-                    bcs       L02F2               If error unlinking, exit
-                    IFNE      H6309
-                    clrd
-                    ELSE
-                    clra
-                    clrb
-                    ENDC
-                    std       >WGlobal+G.GrfEnt   GRFDRV address to non-existant
-                    ldu       >WGlobal+G.GfxTbl   Get ptr to gfx tables
-                    ldd       #$02FF              Size of graphics tables
-                    os9       F$SRtMem            Return graphics table memory to system
-                    bcs       L02F2               If error, exit with it
+* All windows are unallocated.  GrfDrv is now a session-resident shared
+* graphics service: DWEnd has already released per-window display/MBO state,
+* while VTIO and future windows still depend on the shared dispatch endpoint.
+* Keep the module link, G.GrfEnt and G.GfxTbl alive until system-session end.
 TermEx              clrb
                     rts
 

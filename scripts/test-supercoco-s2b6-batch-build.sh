@@ -84,15 +84,20 @@ else:
 batch_start = src.index('SCG_ALPHA_BATCH_COMMIT')
 batch_end = src.index('SCG_RENDER_RECT', batch_start)
 batch = src[batch_start:batch_end]
-for token in (
-    'SCG_PRESENT_BACK',
-    'SCG_BUILD_MIRROR_BLIT_R1',
-    'SCG_SUBMIT_RECORD1',
-    'SCG_ABC_PRE_BAD',
-    'SCG_ABC_POST_BAD',
-):
+dirty_mode = 'SCG_ALPHA_DIRTY_MIRROR' in batch
+for token in ('SCG_PRESENT_BACK', 'SCG_ABC_PRE_BAD', 'SCG_ABC_POST_BAD'):
     if token not in batch:
         raise SystemExit(f'FAIL: batch commit missing {token}')
+if dirty_mode:
+    if 'SCG_ALPHA_DIRTY_MIRROR' not in batch:
+        raise SystemExit('FAIL: dirty descendant lost bounded mirror call')
+    for token in ('SCG_BUILD_MIRROR_BLIT_R1', 'SCG_SUBMIT_RECORD1'):
+        if token in batch:
+            raise SystemExit(f'FAIL: dirty descendant restored full-frame mirror via {token}')
+else:
+    for token in ('SCG_BUILD_MIRROR_BLIT_R1', 'SCG_SUBMIT_RECORD1'):
+        if token not in batch:
+            raise SystemExit(f'FAIL: batch commit missing {token}')
 if batch.count('SCG_PRESENT_BACK') != 1:
     raise SystemExit('FAIL: buffered batch commit must contain exactly one present call')
 if strip_mode and 'SCG_ALPHA_STRIP_FLUSH' not in batch:
@@ -101,10 +106,15 @@ if strip_mode and 'SCG_ALPHA_STRIP_FLUSH' not in batch:
 need('level2/cmds/scgrf.inc', 'negative count here can only belong to the current governed transaction')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'verifyBatchCommands')
 need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'Batched presentation must toggle exactly once relative to single A.')
-need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$8002              width 640 little endian')
+if dirty_mode:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 DIRTY RECT MIRROR PASS')
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              width 16 little endian')
+else:
+    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$8002              width 640 little endian')
 if strip_mode:
     need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED STRIP COMMIT PASS')
-    need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              command width 16 little endian')
+    if not dirty_mode:
+        need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              command width 16 little endian')
 else:
     need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'S2B6 BUFFERED BATCH COMMIT PASS')
     need('level1/wildbits/cmds/scgrfmaskprobe.asm', 'cmpd      #$1000              x=16 little endian')

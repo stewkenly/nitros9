@@ -141,6 +141,17 @@ required=(
   'S2B5 R1K MIRROR PASS'
   'SuperCoCo S2B-5 R1K masked alpha PASS'
 )
+if grep -Fq 'SCG_ALPHA_DIRTY_MIRROR' "$ROOT/level2/cmds/scgrf.inc"; then
+    required+=(
+      'S2B6 DIRTY RECT MIRROR PASS'
+      'S2B6 TWO-ROW DIRTY RECT PASS'
+    )
+fi
+if grep -Fq 'S2B6 STYLE9 REOPEN PASS' "$ROOT/level1/wildbits/cmds/scgrfmaskprobe.asm"; then
+    required+=(
+      'S2B6 STYLE9 REOPEN PASS'
+    )
+fi
 
 if grep -Fq "$FAIL_MARKER" "$SCREEN" 2>/dev/null || grep -Fq "$FAIL_MARKER" "$CONSOLE" 2>/dev/null; then
     echo 'FAIL: native S2B-5 probe reported R1K MASKED_BLIT alpha failure' >&2
