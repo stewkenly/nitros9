@@ -14,4 +14,6 @@ while IFS= read -r makefile; do
     make -C "$recipe_dir" --no-print-directory -n clean >/dev/null
 done < <(find recipes -mindepth 2 -maxdepth 3 -name makefile -print | sort)
 
+"$PWD/scripts/test-supercoco-sc-mode-clients-source.sh"
+
 echo "PASS: NitrOS-9 source/recipe sanity"

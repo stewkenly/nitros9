@@ -145,7 +145,16 @@ SC.SysMagic1         equ       $0001
 SC.SysABIMajor       equ       $0002
 SC.SysABIMinor       equ       $0003
 SC.SysCaps0          equ       $0004
+SC.SysRAMMiB         equ       $0007
+SC.SysRegmapCurrent  equ       $0008
+SC.SysRegmapSupported equ      $0009
+SC.SysRegmapSelect   equ       $000A
 SC.SysCaps1          equ       $000B
+
+SC.RegmapCompat      equ       $00
+SC.RegmapNG          equ       $01
+SC.RegmapCompatBit   equ       $01
+SC.RegmapNGBit       equ       $02
 
 SC.CapCoreFabric     equ       $04
 SC.CapJobV1          equ       $08

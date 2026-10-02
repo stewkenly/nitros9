@@ -32,6 +32,13 @@ SCG.StripStartY     equ       grSCMBOBase         alpha-only alias: +$12..+$13
 SCG.StripRecords    equ       grSCMBOStart        alpha-only alias: +$14
 SCG.StripReplay     equ       grSCMBOStart+1      alpha-only alias: +$15
 
+* grSCScreenTbl is otherwise a real screen-table pointer.  All screen-table
+* entries live below $4000 (STblBse=$1A80), so its two high bits can carry the
+* SC execution-personality lifetime without consuming another direct-page byte.
+SCG.ModeOwnedHi     equ       $80
+SCG.ModeSavedNGHi   equ       $40
+SCG.ModePtrHiMask   equ       $3F
+
 ********************************************************************
 * Initialize private state.  Called only on the first GrfDrv init.
 ********************************************************************
@@ -67,21 +74,43 @@ SCG_DWSET           pshs      x,y,u
                     lbne      SCG_DW_BAD
                     tst       <grSCFlags
                     lbne      SCG_DW_BAD
+                    lda       <grSCScreenTbl
+                    bita      #SCG.ModeOwnedHi
+                    lbne      SCG_DW_BAD
 
                     lbsr      SC_PROBE_R1L
                     lbcs      SCG_DW_BAD
+
+* A production style-9 surface owns the SC execution personality for exactly
+* the lifetime of its VIDEO/MEDIA resources. Discovery remains observational.
+* Encode ownership plus the one-bit previous personality in grSCScreenTbl's
+* unused high bits.  A zero pointer underneath the flags is valid until FScrTbl.
+                    lbsr      SC_REGMAP_ENTER_NG
+                    lbcs      SCG_DW_BAD
+                    cmpa      #SC.RegmapNG
+                    lbeq      SCG_DW_MODE_NG
+                    ldd       #SCG.ModeOwnedHi*256
+                    lbra      SCG_DW_MODE_SAVE
+SCG_DW_MODE_NG      ldd       #(SCG.ModeOwnedHi!SCG.ModeSavedNGHi)*256
+SCG_DW_MODE_SAVE    std       <grSCScreenTbl
+
                     lbsr      SCG_PROBE_VIDEO
-                    lbcs      SCG_DW_BAD
+                    lbcs      SCG_DW_FAIL
                     lbsr      SCG_PROBE_GRAPHICS
-                    lbcs      SCG_DW_BAD
+                    lbcs      SCG_DW_FAIL
 
 * Allocate one normal NitrOS screen-table entry, but mark its legacy RAM block
 * byte with $FF.  SCG paths intercept this type before old GIME/MMU code can
 * interpret that byte as a physical legacy screen allocation.
                     lbsr      FScrTbl
-                    lbcs      SCG_DW_BAD
+                    lbcs      SCG_DW_FAIL
                     stx       Wt.STbl,y
-                    stx       <grSCScreenTbl
+* Preserve the encoded mode bits while attaching the real table pointer.
+                    pshs      d
+                    tfr       x,d
+                    ora       <grSCScreenTbl
+                    std       <grSCScreenTbl
+                    puls      d
                     lda       #SCGrfType
                     sta       St.Sty,x
                     lda       #$FF
@@ -2107,6 +2136,31 @@ SCG_FR_BAD          ldb       #E$NotRdy
                     rts
 
 ********************************************************************
+* Restore the execution personality only after all SC resource ownership has
+* drained. If restore fails, retain ownership state so a later terminate can
+* retry instead of silently claiming the machine was returned to its caller.
+********************************************************************
+SCG_RESTORE_MODE    lda       <grSCScreenTbl
+                    bita      #SCG.ModeOwnedHi
+                    lbeq      SCG_RM_MODE_DONE
+                    bita      #SCG.ModeSavedNGHi
+                    lbeq      SCG_RM_MODE_COMPAT
+                    lda       #SC.RegmapNG
+                    lbra      SCG_RM_MODE_SELECT
+SCG_RM_MODE_COMPAT  lda       #SC.RegmapCompat
+SCG_RM_MODE_SELECT  lbsr      SC_REGMAP_RESTORE
+                    lbcs      SCG_RM_MODE_BAD
+                    clra
+                    clrb
+                    std       <grSCScreenTbl
+SCG_RM_MODE_DONE    clrb
+                    andcc     #^Carry
+                    rts
+SCG_RM_MODE_BAD     ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
+********************************************************************
 * Conservative complete teardown.
 ********************************************************************
 SCG_CLEANUP         pshs      x,y
@@ -2127,12 +2181,20 @@ SCG_CLEANUP         pshs      x,y
                     lbsr      SCG_FREE_RAM
                     lbcs      SCG_CL_BAD
 
-                    ldx       <grSCScreenTbl
+                    ldd       <grSCScreenTbl
+                    anda      #SCG.ModePtrHiMask
+                    tfr       d,x
                     beq       SCG_CL_NO_TABLE
                     clr       St.SBlk,x
-SCG_CL_NO_TABLE     clra
+SCG_CL_NO_TABLE
+* The table pointer is no longer live.  Retain only mode ownership until the
+* verified restore succeeds; a failed restore therefore remains retryable.
+                    ldd       <grSCScreenTbl
+                    anda      #SCG.ModeOwnedHi!SCG.ModeSavedNGHi
                     clrb
                     std       <grSCScreenTbl
+                    clra
+                    clrb
                     std       <grSCFB0Start
                     std       <grSCFB1Start
                     std       <grSCCmdStart
@@ -2140,6 +2202,8 @@ SCG_CL_NO_TABLE     clra
                     std       <grSCGenCmd+2
                     sta       <grSCBack
                     sta       <grSCFlags
+                    lbsr      SCG_RESTORE_MODE
+                    lbcs      SCG_CL_BAD
                     andcc     #^Carry
                     puls      x,y,pc
 SCG_CL_BAD          orcc      #Carry
@@ -2167,8 +2231,11 @@ SCG_DWEND_BAD       jmp       >GrfStrt+SysRet
 * MBO or VIDEO consumer can still own it.
 ********************************************************************
 SCG_TERM            lda       <grSCFlags
+                    lbne      SCG_TERM_CLEAN
+                    lda       <grSCScreenTbl
+                    bita      #SCG.ModeOwnedHi
                     lbeq      SCG_TERM_DONE
-                    lbsr      SCG_CLEANUP
+SCG_TERM_CLEAN      lbsr      SCG_CLEANUP
                     rts
 SCG_TERM_DONE       clrb
                     andcc     #^Carry

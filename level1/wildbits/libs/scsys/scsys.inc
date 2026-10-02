@@ -200,6 +200,86 @@ scpBad              ldb       #E$NotRdy
                     rts
 
 ********************************************************************
+* Explicit SuperCoCo execution-personality helpers.
+*
+* SC_REGMAP_ENTER_NG
+* Exit success: A = previous register-map personality, B = 0, carry clear.
+* The helper verifies NG support, selects NG, and reads back the selection.
+*
+* SC_REGMAP_RESTORE
+* Entry: A = previous personality returned by SC_REGMAP_ENTER_NG.
+* Exit: B = 0, carry clear after verified restore.
+*
+* These helpers deliberately do not belong to SC_PROBE_R1L: discovery is
+* observational and must not silently change machine execution speed.
+********************************************************************
+SC_REGMAP_ENTER_NG pshs      x,y
+                    ldx       #SC.SysRegmapCurrent
+                    lbsr      SC_READ8
+                    lbcs      screBad
+                    pshs      a
+
+                    ldx       #SC.SysRegmapSupported
+                    lbsr      SC_READ8
+                    lbcs      screDropBad
+                    bita      #SC.RegmapNGBit
+                    lbeq      screDropBad
+
+                    ldx       #SC.SysRegmapSelect
+                    lda       #SC.RegmapNG
+                    lbsr      SC_WRITE8
+                    lbcs      screDropBad
+
+                    ldx       #SC.SysRegmapCurrent
+                    lbsr      SC_READ8
+                    lbcs      screDropBad
+                    cmpa      #SC.RegmapNG
+                    lbne      screDropBad
+
+                    lda       ,s
+                    leas      1,s
+                    clrb
+                    puls      x,y
+                    andcc     #^Carry
+                    rts
+
+screDropBad        leas      1,s
+screBad            ldb       #E$NotRdy
+                    puls      x,y
+                    orcc      #Carry
+                    rts
+
+SC_REGMAP_RESTORE   pshs      x,y
+                    pshs      a
+                    cmpa      #SC.RegmapCompat
+                    lbeq      scrrSelect
+                    cmpa      #SC.RegmapNG
+                    lbne      scrrDropBad
+
+scrrSelect          ldx       #SC.SysRegmapSelect
+                    lda       ,s
+                    lbsr      SC_WRITE8
+                    lbcs      scrrDropBad
+
+                    ldx       #SC.SysRegmapCurrent
+                    lbsr      SC_READ8
+                    lbcs      scrrDropBad
+                    cmpa      ,s
+                    lbne      scrrDropBad
+
+                    leas      1,s
+                    clrb
+                    puls      x,y
+                    andcc     #^Carry
+                    rts
+
+scrrDropBad        leas      1,s
+                    ldb       #E$NotRdy
+                    puls      x,y
+                    orcc      #Carry
+                    rts
+
+********************************************************************
 * Unified service-event helpers.  These access the invariant MMIO bytes
 * directly; no service-page transaction is required.
 ********************************************************************

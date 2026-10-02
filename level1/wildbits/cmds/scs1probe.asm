@@ -24,6 +24,7 @@ atrv                set       ReEnt+rev
 
                     org       0
 savedMask           rmb       1
+savedRegmap         rmb       1
 generation          rmb       4
 rateBytes           rmb       4
 stackSpace          rmb       128
@@ -51,6 +52,14 @@ msgFailLen          equ       *-msgFail
 start
 * Shared discovery must recognize the currently frozen R1L foundation.
                     lbsr      SC_PROBE_R1L
+                    lbcs      fail
+
+* Prove explicit SC entry is a separate, reversible action from discovery.
+                    lbsr      SC_REGMAP_ENTER_NG
+                    lbcs      fail
+                    sta       savedRegmap,u
+                    lda       savedRegmap,u
+                    lbsr      SC_REGMAP_RESTORE
                     lbcs      fail
 
 * Exercise the 32-bit portal helper on the fixed 48000 Hz Audio V1 rate.

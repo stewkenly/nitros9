@@ -876,7 +876,7 @@ grSCSurfaceGenPtr   EQU       grRsrved+$1F
 grSCSurfaceSlot     EQU       grRsrved+$21
 grSCPaletteLeft     EQU       grRsrved+$22
 grSCBack            EQU       grRsrved+$23
-grSCScreenTbl       EQU       grRsrved+$24
+grSCScreenTbl       EQU       grRsrved+$24        pointer bits 13:0; scgrf uses bits 15:14 for SC-mode lifetime state
 grSCCmdStart        EQU       grRsrved+$26
 grSCGenCmd          EQU       grRsrved+$28
 grSCColor           EQU       grRsrved+$2C

@@ -15,6 +15,8 @@ done
 
 grep -Fq 'SC_READ8' level1/wildbits/libs/scsys/scsys.inc
 grep -Fq 'SC_PROBE_R1L' level1/wildbits/libs/scsys/scsys.inc
+grep -Fq 'SC_REGMAP_ENTER_NG' level1/wildbits/libs/scsys/scsys.inc
+grep -Fq 'SC_REGMAP_RESTORE' level1/wildbits/libs/scsys/scsys.inc
 grep -Fq 'SC_MBO_NEXTGEN' level1/wildbits/libs/scsys/scsys.inc
 grep -Fq '../level1/wildbits/libs/scsys/scsys.inc' lib/wildbitsl2.as
 grep -Fq 'lbsr      SC_PROBE_R1L' level1/wildbits/cmds/scinfo.asm
@@ -63,6 +65,12 @@ __start             ldx       #SC.SysMagic0
                     lbsr      SC_READ8
                     bcs       bad
                     lbsr      SC_PROBE_R1L
+                    bcs       bad
+                    lbsr      SC_REGMAP_ENTER_NG
+                    bcs       bad
+                    pshs      a
+                    puls      a
+                    lbsr      SC_REGMAP_RESTORE
                     bcs       bad
                     lda       #SC.IRQImplemented
                     lbsr      SC_IRQ_MASK_SET

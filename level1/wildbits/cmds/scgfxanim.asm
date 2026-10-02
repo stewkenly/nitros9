@@ -78,6 +78,8 @@ srcGeneration       rmb       4
 
 resourceFlags0      rmb       1
 resourceFlags1      rmb       1
+savedRegmap         rmb       1
+modeEntered         rmb       1
 
 mboBase             rmb       2
 mboStartBlock       rmb       2
@@ -161,6 +163,7 @@ tileRowColors       fcb       $23,$45,$67,$89,$AB,$CD,$EF,$5A
 
 start               clr       resourceFlags0,u
                     clr       resourceFlags1,u
+                    clr       modeEntered,u
                     clr       jobTag,u
                     clr       jobTag+1,u
                     leax      msgBanner,pcr
@@ -169,6 +172,10 @@ start               clr       resourceFlags0,u
 
                     lbsr      SC_PROBE_R1L
                     lbcs      demoFail
+                    lbsr      SC_REGMAP_ENTER_NG
+                    lbcs      demoFail
+                    sta       savedRegmap,u
+                    inc       modeEntered,u
                     lbsr      probeGraphics
                     lbcs      demoFail
                     lbsr      prepareSlots
@@ -239,6 +246,8 @@ start               clr       resourceFlags0,u
                     lbsr      revokeFramebufferMBO0
                     lbcs      demoFail
                     lbsr      freeBacking
+                    lbcs      demoFail
+                    lbsr      restoreSCMode
                     lbcs      demoFail
 
                     leax      msgPass,pcr
@@ -1615,6 +1624,19 @@ fbkBad              ldb       #E$NotRdy
                     orcc      #Carry
                     rts
 
+restoreSCMode       lda       modeEntered,u
+                    lbeq      rsmDone
+                    lda       savedRegmap,u
+                    lbsr      SC_REGMAP_RESTORE
+                    lbcs      rsmBad
+                    clr       modeEntered,u
+rsmDone             clrb
+                    andcc     #^Carry
+                    rts
+rsmBad              ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
 cleanupBestEffort   lbsr      drainMediaJob
                     lbsr      disableDisplay
                     lbsr      unmapCommand
@@ -1624,7 +1646,14 @@ cleanupBestEffort   lbsr      drainMediaJob
                     lbsr      revokeFramebufferMBO1
                     lbsr      revokeFramebufferMBO0
                     lbsr      freeBacking
-                    rts
+                    lda       resourceFlags0,u
+                    anda      #RF0.MBO0!RF0.MBO1!RF0.MBOCmd!RF0.MBOSrc
+                    lbne      cbDone
+                    lda       resourceFlags1,u
+                    bita      #RF1.Video
+                    lbne      cbDone
+                    lbsr      restoreSCMode
+cbDone              rts
 
 writeLine           lda       #1
                     os9       I$WritLn

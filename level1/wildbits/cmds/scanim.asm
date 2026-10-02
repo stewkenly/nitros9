@@ -55,6 +55,8 @@ fbPPN               rmb       2
 fbGeneration0       rmb       4
 fbGeneration1       rmb       4
 fbFlags             rmb       1
+savedRegmap         rmb       1
+modeEntered         rmb       1
 fbBlocksLeft        rmb       1
 fbPagesLeft         rmb       1
 paletteBytesLeft    rmb       1
@@ -124,12 +126,17 @@ paletteRGB          fcb       $00,$00,$00
                     fcb       $FF,$FF,$FF
 
 start               clr       fbFlags,u
+                    clr       modeEntered,u
                     leax      msgBanner,pcr
                     ldy       #msgBannerLen
                     lbsr      writeLine
 
                     lbsr      SC_PROBE_R1L
                     lbcs      demoFail
+                    lbsr      SC_REGMAP_ENTER_NG
+                    lbcs      demoFail
+                    sta       savedRegmap,u
+                    inc       modeEntered,u
                     lbsr      prepareSlots
                     lbcs      demoFail
 
@@ -167,6 +174,8 @@ start               clr       fbFlags,u
                     lbsr      revokeMBO0
                     lbcs      demoFail
                     lbsr      freeFramebuffers
+                    lbcs      demoFail
+                    lbsr      restoreSCMode
                     lbcs      demoFail
 
                     leax      msgPass,pcr
@@ -888,11 +897,28 @@ ffBad               ldb       #E$NotRdy
 * Conservative failure cleanup. A failure may intentionally leak RAM until
 * reboot, but physical blocks are never returned while a consumer may own them.
 ********************************************************************
+restoreSCMode       lda       modeEntered,u
+                    lbeq      rsmDone
+                    lda       savedRegmap,u
+                    lbsr      SC_REGMAP_RESTORE
+                    lbcs      rsmBad
+                    clr       modeEntered,u
+rsmDone             clrb
+                    andcc     #^Carry
+                    rts
+rsmBad              ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
 cleanupBestEffort   lbsr      disableDisplay
                     lbsr      revokeMBO1
                     lbsr      revokeMBO0
                     lbsr      freeFramebuffers
-                    rts
+                    lda       fbFlags,u
+                    bita      #FB.FlagsMBO0!FB.FlagsMBO1!FB.FlagsVideo
+                    lbne      cbDone
+                    lbsr      restoreSCMode
+cbDone              rts
 
 writeLine           lda       #1
                     os9       I$WritLn

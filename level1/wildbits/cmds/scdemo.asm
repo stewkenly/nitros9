@@ -39,6 +39,8 @@ fbMapAddress        rmb       2
 fbPPN               rmb       2
 fbGeneration        rmb       4
 fbFlags             rmb       1
+savedRegmap         rmb       1
+modeEntered         rmb       1
 fbBlocksLeft        rmb       1
 fbPagesLeft         rmb       1
 barValue            rmb       1
@@ -86,12 +88,17 @@ paletteRGB          fcb       $00,$00,$00
                     fcb       $FF,$FF,$FF
 
 start               clr       fbFlags,u
+                    clr       modeEntered,u
                     leax      msgBanner,pcr
                     ldy       #msgBannerLen
                     lbsr      writeLine
 
                     lbsr      SC_PROBE_R1L
                     lbcs      demoFail
+                    lbsr      SC_REGMAP_ENTER_NG
+                    lbcs      demoFail
+                    sta       savedRegmap,u
+                    inc       modeEntered,u
 
                     leax      msgAlloc,pcr
                     ldy       #msgAllocLen
@@ -128,6 +135,8 @@ start               clr       fbFlags,u
                     lbsr      revokeMBO0
                     lbcs      demoFail
                     lbsr      freeFramebuffer
+                    lbcs      demoFail
+                    lbsr      restoreSCMode
                     lbcs      demoFail
 
                     leax      msgPass,pcr
@@ -562,12 +571,29 @@ ffBad               ldb       #E$NotRdy
 * may still own it. A failed drain can leak until reboot, but cannot create a
 * use-after-free against VIDEO.
 ********************************************************************
+restoreSCMode       lda       modeEntered,u
+                    lbeq      rsmDone
+                    lda       savedRegmap,u
+                    lbsr      SC_REGMAP_RESTORE
+                    lbcs      rsmBad
+                    clr       modeEntered,u
+rsmDone             clrb
+                    andcc     #^Carry
+                    rts
+rsmBad              ldb       #E$NotRdy
+                    orcc      #Carry
+                    rts
+
 cleanupBestEffort   lbsr      disableDisplay
                     lbcs      cbKeep
                     lbsr      revokeMBO0
                     lbcs      cbKeep
                     lbsr      freeFramebuffer
-cbKeep              rts
+cbKeep              lda       fbFlags,u
+                    bita      #FB.FlagsMBO!FB.FlagsVideo
+                    lbne      cbDone
+                    lbsr      restoreSCMode
+cbDone              rts
 
 writeLine           lda       #1
                     os9       I$WritLn

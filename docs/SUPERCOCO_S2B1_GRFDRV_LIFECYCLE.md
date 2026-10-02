@@ -26,6 +26,8 @@ The candidate backend owns:
 - GIME-NG surfaces 0 and 1 with 320-byte stride;
 - RGB888 16-entry startup palette;
 - VBLANK-safe GIME-NG enable/disable using the closed S1 event helpers;
+- explicit SC/NG execution-personality ownership while style-9 VIDEO/MEDIA resources are live, restoring the prior personality only after successful drain;
+- no GrfDrv DP expansion: ownership and the previous COMPAT/NG personality are encoded in the unused high two bits of `grSCScreenTbl`, while its real screen-table pointer remains in bits 13:0;
 - conservative revoke/drain/free on normal DWEnd;
 - hiding GIME-NG before selecting a legacy screen;
 - use of previously reserved `GrfDrv` direct-page bytes only, preserving all historical legacy state layout.

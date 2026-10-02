@@ -20,13 +20,14 @@ The shared `scsys` source and Wildbits Level-2 library export the following reta
 - `SC_READ16LE`, `SC_WRITE16LE`
 - `SC_READ32LE`, `SC_WRITE32LE`
 - `SC_PROBE_R1L`
+- `SC_REGMAP_ENTER_NG`, `SC_REGMAP_RESTORE`
 - `SC_IRQ_GET`, `SC_IRQ_ACK`
 - `SC_IRQ_MASK_GET`, `SC_IRQ_MASK_SET`
 - `SC_MBO_BASE`, `SC_MBO_STATUS`
 - `SC_MBO_COMMIT`, `SC_MBO_REVOKE`
 - `SC_MBO_NEXTGEN`
 
-The OS-9 convention remains carry-clear success and carry-set failure with `B` containing the OS-9 error code.
+The OS-9 convention remains carry-clear success and carry-set failure with `B` containing the OS-9 error code. `SC_PROBE_R1L` remains observational; live VIDEO/MEDIA/AUDIO clients explicitly enter the NG/SC execution personality and restore the prior personality only after their service resources are drained.
 
 ## Runtime acceptance
 
